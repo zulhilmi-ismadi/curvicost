@@ -38,9 +38,9 @@ all = ["curvicost[io,test]"]
 curvicost = "curvicost.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/AUTHOR/curvicost"
-Source = "https://github.com/AUTHOR/curvicost"
-Issues = "https://github.com/AUTHOR/curvicost/issues"
+Homepage = "https://github.com/zulhilmi-ismadi/curvicost"
+Source = "https://github.com/zulhilmi-ismadi/curvicost"
+Issues = "https://github.com/zulhilmi-ismadi/curvicost/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/curvicost"]
