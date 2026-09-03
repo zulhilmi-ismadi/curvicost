@@ -54,6 +54,42 @@ Generate a graded, typed error from the command line:
 curvicost perturb gt.tif --operator break --severity 0.1 -o broken.tif
 ```
 
+## Which error types is your metric blind to?
+
+Whether a metric predicts functional cost depends on the error type, the
+structure class **and** the cost — so a published table for retina does not
+transfer to neurites. `audit` recomputes the map on your own reference masks:
+
+```bash
+curvicost audit gt1.tif gt2.tif gt3.tif --csv blindness.csv
+```
+
+```
+  vs traceable length
+  metric              break     bridge   truncate     radius   boundary
+  dice               +0.88      +0.07*     +0.90      -0.68!     -0.74!
+  cldice             +0.86      +0.17*     +0.97      +0.30      -0.91!
+  erl_frac           +0.93      -0.54*     +0.97      -0.75!     -0.91!
+
+  * CI includes zero — blind to that error type
+  ! anti-correlates — the metric moves the WRONG WAY
+```
+
+Read it as a warning list. A starred cell means that metric cannot see that
+error type on your data: report it and you are reporting nothing about that
+failure mode. A `!` is worse — the metric moves the wrong way, which usually
+means the *cost* is wrong for that error rather than the metric. A spurious
+bridge, for instance, reconnects a tree and so *raises* traceable length; no
+choice of metric fixes that, only a merge-sensitive cost will.
+
+Correlations are sign-aligned, so more positive always means "tracks the
+cost", whichever direction the raw metric runs.
+
+**Give it at least three reference masks.** Confidence intervals come from
+resampling whole masks, so with fewer than three the tool reports correlations
+without CIs and says so rather than inventing them. Each operator also needs
+at least three severities; it names any it had to skip.
+
 ## What it measures
 
 **Metrics** — Dice, IoU, clDice, Betti-0 error, expected run length (ERL),

@@ -72,6 +72,94 @@ def _cmd_score(args):
     return 0
 
 
+_COST_LABEL = {"traceable_frac": "traceable length", "conductance_frac": "conductance"}
+
+
+def _audit_report(result, stream):
+    """The blindness report: metrics down, operators across, one block per cost."""
+    from .audit import OPERATORS, METRIC_ORDER
+
+    metrics = [m for m in METRIC_ORDER
+               if any(f["metric"] == m for f in result["findings"])]
+    print(f"\n{result['n_cases']} cases from {result['n_units']} reference mask(s)",
+          file=stream)
+    if not result["has_ci"]:
+        print("⚠  fewer than 3 reference masks: correlations are reported WITHOUT "
+              "confidence\n   intervals, and blindness cannot be judged. Treat these as "
+              "indicative only.", file=stream)
+
+    for cost in dict.fromkeys(f["cost"] for f in result["findings"]):
+        print(f"\n  vs {_COST_LABEL.get(cost, cost)}", file=stream)
+        print("  " + "metric".ljust(14) + "".join(o.rjust(11) for o in OPERATORS),
+              file=stream)
+        for m in metrics:
+            cells = ""
+            for op in OPERATORS:
+                f = next((f for f in result["findings"]
+                          if f["cost"] == cost and f["operator"] == op
+                          and f["metric"] == m), None)
+                if f is None or f["aligned_rho"] != f["aligned_rho"]:
+                    cells += "         --"
+                else:
+                    mark = "*" if f["blind"] else ("!" if f["anti"] else " ")
+                    cells += f"{f['aligned_rho']:>+10.2f}{mark}"
+            print("  " + m.ljust(14) + cells, file=stream)
+
+    if result.get("skipped"):
+        detail = ", ".join(f"{op} ({n} case{'s' if n != 1 else ''})"
+                           for op, n in sorted(result["skipped"].items()))
+        print(f"\n⚠  skipped for too few cases (need 3+ per operator): {detail}."
+              "\n   Pass more values to --severities, or raise --seeds.", file=stream)
+    if not result["findings"]:
+        print("\nNo correlations could be computed. See above.", file=stream)
+        return
+    blind = [f for f in result["findings"] if f["blind"]]
+    anti = [f for f in result["findings"] if f["anti"]]
+    print(f"\n  * CI includes zero — blind to that error type   ({len(blind)} of "
+          f"{len(result['findings'])} combinations)", file=stream)
+    print(f"  ! anti-correlates — the metric moves the WRONG WAY   ({len(anti)})",
+          file=stream)
+    if anti:
+        worst = min(anti, key=lambda f: f["aligned_rho"])
+        print(f"    worst: {worst['metric']} vs {_COST_LABEL.get(worst['cost'])} on "
+              f"{worst['operator']} (ρ {worst['aligned_rho']:+.2f}). A cost that a "
+              f"perturbation\n    can IMPROVE is the wrong cost for that error type — "
+              "no metric choice fixes it.", file=stream)
+
+
+def _cmd_audit(args):
+    import json as _json
+    from .audit import sweep, audit, DEFAULT_SEVERITIES
+
+    severities = dict(DEFAULT_SEVERITIES)
+    if args.severities:
+        vals = tuple(float(v) for v in args.severities.split(","))
+        for op in ("break", "bridge", "truncate"):
+            severities[op] = vals
+
+    rows, seeds = [], tuple(range(args.seeds))
+    for path in args.masks:
+        mask, _ = load_mask(path)
+        if not args.quiet:
+            print(f"sweeping {path} ...", file=sys.stderr, flush=True)
+        rows += sweep(mask, severities=severities, seeds=seeds,
+                      prune_px=args.prune_px, with_erl=not args.no_erl,
+                      unit=str(path))
+    result = audit(rows, n_boot=args.n_boot)
+
+    if args.json:
+        with open(args.json, "w") as fh:
+            _json.dump(dict(result, cases=rows if args.include_cases else None),
+                       fh, indent=2, default=float)
+    if args.csv:
+        with open(args.csv, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(result["findings"][0]))
+            w.writeheader(); w.writerows(result["findings"])
+    if not args.quiet:
+        _audit_report(result, sys.stdout)
+    return 0
+
+
 def _cmd_perturb(args):
     from .perturb import perturb
 
@@ -124,6 +212,24 @@ def build_parser():
     p.add_argument("-o", "--output", required=True, help="where to write the result")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=_cmd_perturb)
+
+    a = subs.add_parser("audit", help="which error types is your metric blind to?")
+    a.add_argument("masks", nargs="+", help="reference binary masks (3+ for CIs)")
+    a.add_argument("--json", metavar="PATH", help="write the full result as JSON")
+    a.add_argument("--csv", metavar="PATH", help="write the findings table as CSV")
+    a.add_argument("--severities", metavar="LIST",
+                   help="comma-separated severities for break/bridge/truncate "
+                        "(default 0.02,0.05,0.1,0.2,0.5)")
+    a.add_argument("--seeds", type=int, default=1, metavar="N",
+                   help="random seeds per operator/severity (default 1)")
+    a.add_argument("--n-boot", type=int, default=1000, metavar="N",
+                   help="cluster-bootstrap iterations (default 1000)")
+    a.add_argument("--no-erl", action="store_true")
+    a.add_argument("--prune-px", type=int, default=5, metavar="N")
+    a.add_argument("--include-cases", action="store_true",
+                   help="also write every scored case into the JSON")
+    a.add_argument("--quiet", action="store_true")
+    a.set_defaults(func=_cmd_audit)
     return parser
 
 
