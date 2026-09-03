@@ -119,3 +119,34 @@ def test_cli_audit_warns_when_ci_impossible(tmp_path, twotrees, capsys):
     main(["audit", str(p), "--severities", "0.1,0.3,0.5", "--n-boot", "20"])
     out = capsys.readouterr().out
     assert "WITHOUT" in out and "confidence" in out
+
+
+def test_scale_report_measures_prune_in_vessel_radii(tree2d):
+    from curvicost.audit import scale_report
+    r = scale_report(tree2d, prune_px=5)
+    assert r["median_radius"] > 0
+    assert r["prune_in_radii"] == pytest.approx(5 / r["median_radius"])
+
+
+def test_scale_report_tracks_thickness(tree2d):
+    """A thicker structure must report a LOWER prune-in-radii for the same
+    prune_px -- that is the whole point of the diagnostic."""
+    from scipy import ndimage
+    from curvicost.audit import scale_report
+    thick = ndimage.binary_dilation(tree2d, iterations=3)
+    assert scale_report(thick, 5)["prune_in_radii"] < \
+           scale_report(tree2d, 5)["prune_in_radii"]
+
+
+def test_cli_audit_warns_on_mismatched_scale(tmp_path, tree2d, capsys):
+    """prune_px is an absolute length; on a very thick structure it prunes far
+    less than the ~2 radii the tool was calibrated on, and must say so."""
+    from scipy import ndimage
+    from curvicost.io import save_mask
+    thick = ndimage.binary_dilation(tree2d, iterations=6)
+    p = save_mask(thick, tmp_path / "thick.npy")
+    main(["audit", str(p), "--severities", "0.1,0.3,0.5", "--n-boot", "20",
+          "--prune-px", "1"])
+    out = capsys.readouterr().out
+    assert "scale:" in out and "vessel radii" in out
+    assert "not\n     comparable across datasets" in out or "comparable across" in out

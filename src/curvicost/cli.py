@@ -105,6 +105,18 @@ def _audit_report(result, stream):
                     cells += f"{f['aligned_rho']:>+10.2f}{mark}"
             print("  " + m.ljust(14) + cells, file=stream)
 
+    sc = result.get("scale")
+    if sc:
+        print(f"\n  scale: median vessel radius {sc['median_radius']:.1f} px; "
+              f"--prune-px {sc['prune_px']} = {sc['prune_in_radii']:.1f} vessel radii.",
+              file=stream)
+        # The study cells run ~2.0-2.5 radii. FIVES at 0.75 demonstrably
+        # shifted several correlations, so the band has to exclude it.
+        if not (1.0 <= sc["prune_in_radii"] <= 4.0):
+            print("  ⚠  that is far from the ~2 radii this tool was calibrated on. "
+                  "Spur pruning is an\n     ABSOLUTE pixel length, so results are not "
+                  "comparable across datasets sampled at\n     different resolutions "
+                  "unless you match this ratio.", file=stream)
     if result.get("skipped"):
         detail = ", ".join(f"{op} ({n} case{'s' if n != 1 else ''})"
                            for op, n in sorted(result["skipped"].items()))
@@ -129,6 +141,8 @@ def _audit_report(result, stream):
 
 def _cmd_audit(args):
     import json as _json
+
+    import numpy as np
     from .audit import sweep, audit, DEFAULT_SEVERITIES
 
     severities = dict(DEFAULT_SEVERITIES)
@@ -137,15 +151,24 @@ def _cmd_audit(args):
         for op in ("break", "bridge", "truncate"):
             severities[op] = vals
 
-    rows, seeds = [], tuple(range(args.seeds))
+    from .audit import scale_report
+
+    rows, seeds, scales = [], tuple(range(args.seeds)), []
     for path in args.masks:
         mask, _ = load_mask(path)
         if not args.quiet:
             print(f"sweeping {path} ...", file=sys.stderr, flush=True)
+        scales.append(scale_report(mask, args.prune_px))
         rows += sweep(mask, severities=severities, seeds=seeds,
                       prune_px=args.prune_px, with_erl=not args.no_erl,
                       unit=str(path))
     result = audit(rows, n_boot=args.n_boot)
+    if scales:
+        radii = [s["median_radius"] for s in scales]
+        ratios = [s["prune_in_radii"] for s in scales]
+        result["scale"] = dict(median_radius=float(np.median(radii)),
+                               prune_px=args.prune_px,
+                               prune_in_radii=float(np.median(ratios)))
 
     if args.json:
         with open(args.json, "w") as fh:

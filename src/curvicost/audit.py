@@ -22,7 +22,7 @@ from scipy.stats import ConstantInputWarning, spearmanr
 from .perturb import perturb, OPERATORS
 from .score import score
 
-__all__ = ["audit", "sweep", "DEFAULT_SEVERITIES", "COSTS"]
+__all__ = ["audit", "sweep", "scale_report", "DEFAULT_SEVERITIES", "COSTS"]
 
 #: Kept short by default: an audit is a diagnostic the user runs on their own
 #: machine, not the paper's 9,612-case sweep. Widen with --severities.
@@ -42,6 +42,29 @@ HIGHER_IS_BETTER = {
     "erl_frac": True, "diadem_like": True,
 }
 METRIC_ORDER = ("dice", "iou", "cldice", "betti0_error", "erl_frac", "diadem_like")
+
+
+def scale_report(mask, prune_px=5):
+    """How big is `prune_px` in units of this mask's own vessel width?
+
+    `prune_px` is an ABSOLUTE pixel length, so the same value does different
+    jobs on differently-sampled data. On STARE (median skeleton radius 2.1 px)
+    the default 5 prunes spurs shorter than ~2.4 vessel radii; on FIVES (radius
+    6.3 px) the same 5 prunes only ~0.8 radii, keeping far more small branches.
+    Correlations are not comparable across datasets unless this ratio is.
+
+    Returns {"median_radius", "prune_px", "prune_in_radii"}.
+    """
+    from scipy import ndimage
+    from skimage.morphology import skeletonize
+
+    mask = np.asarray(mask).astype(bool)
+    skel = skeletonize(mask)
+    dist = ndimage.distance_transform_edt(mask)
+    radii = dist[skel]
+    median = float(np.median(radii)) if radii.size else float("nan")
+    return dict(median_radius=median, prune_px=prune_px,
+                prune_in_radii=(prune_px / median) if median > 0 else float("nan"))
 
 
 def sweep(mask, *, severities=None, seeds=(0,), prune_px=5, with_erl=True,
