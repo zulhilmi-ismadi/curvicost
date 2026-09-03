@@ -88,9 +88,9 @@ def test_too_few_severities_is_reported_not_silent(twotrees):
     """Two severities cannot be correlated. The result must say which operators
     it dropped, or the user sees an empty table and no reason for it."""
     rows = sweep(twotrees, severities={"break": (0.1, 0.5)}, unit="t")
-    res = audit(rows, n_boot=20)
+    res = audit(rows, n_boot=20, attempted=["break"])
     assert res["findings"] == []
-    assert "break" in res["skipped"] and res["skipped"]["break"] == 2
+    assert "break" in res["notes"] and "3+" in res["notes"]["break"]
 
 
 def test_cli_explains_an_empty_report(tmp_path, twotrees, capsys):
@@ -98,7 +98,7 @@ def test_cli_explains_an_empty_report(tmp_path, twotrees, capsys):
     p = save_mask(twotrees, tmp_path / "m.npy")
     main(["audit", str(p), "--severities", "0.1,0.5", "--n-boot", "20"])
     out = capsys.readouterr().out
-    assert "skipped for too few cases" in out
+    assert "needs 3+ to correlate" in out
 
 
 def test_cli_audit_writes_json_and_csv(tmp_path, twotrees):
@@ -150,3 +150,12 @@ def test_cli_audit_warns_on_mismatched_scale(tmp_path, tree2d, capsys):
     out = capsys.readouterr().out
     assert "scale:" in out and "vessel radii" in out
     assert "not\n     comparable across datasets" in out or "comparable across" in out
+
+
+def test_declined_operator_is_explained(tree2d):
+    """`bridge` legitimately declines on a clean single tree. The result must
+    say why rather than leaving a blank column."""
+    rows = sweep(tree2d, severities={"bridge": (0.1, 0.3, 0.5)}, unit="t")
+    res = audit(rows, n_boot=20, attempted=["bridge"])
+    assert rows == [] or all(r["operator"] != "bridge" for r in rows)
+    assert "bridge" in res["notes"] and "declined" in res["notes"]["bridge"]

@@ -136,25 +136,43 @@ def _bootstrap(x, y, units, n_boot, seed=0):
     return obs, float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
 
 
-def audit(rows, *, costs=COSTS, n_boot=1000, seed=0):
+def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
     """Correlate every metric against every cost, per operator.
+
+    `attempted` names the operators that were actually swept. It cannot be
+    inferred from `rows`, because an operator that declined on every severity
+    and one that was never requested both leave no trace there -- and the
+    first is worth reporting while the second is not.
 
     Returns {"n_cases", "n_units", "has_ci", "findings": [...]}. Each finding
     carries the SIGN-ALIGNED rho, so "more positive" always means "this metric
     tracks this cost", whichever direction the raw metric runs.
     """
+    attempted = tuple(OPERATORS if attempted is None else attempted)
+    notes = {}
+    for operator in attempted:
+        # Explain every operator that cannot produce a number. A blank column
+        # with no reason is indistinguishable from a bug, and one of these
+        # reasons IS effectively a bug in the caller's setup.
+        n = sum(1 for r in rows if r["operator"] == operator)
+        if n == 0:
+            notes[operator] = ("produced no cases — the operator declined on every "
+                               "severity. `bridge` needs two skeleton tips within "
+                               "max_gap (12 px, an ABSOLUTE length) but far apart in "
+                               "the graph; on thick or heavily pruned structures no "
+                               "such pair exists.")
+        elif n < 3:
+            notes[operator] = (f"only {n} case(s) — needs 3+ to correlate. Pass more "
+                               "values to --severities or raise --seeds.")
     if not rows:
-        return dict(n_cases=0, n_units=0, has_ci=False, findings=[], skipped={})
+        return dict(n_cases=0, n_units=0, has_ci=False, findings=[], notes=notes)
     units = sorted({r["unit"] for r in rows})
     metrics = [m for m in METRIC_ORDER if m in rows[0]]
-    findings, skipped = [], {}
+    findings = []
     for cost in costs:
         for operator in OPERATORS:
             sub = [r for r in rows if r["operator"] == operator]
             if len(sub) < 3:
-                # Silently dropping these produces an empty report that looks
-                # like "nothing to see" rather than "not enough severities".
-                skipped[operator] = len(sub)
                 continue
             for metric in metrics:
                 r, lo, hi = _bootstrap([s[metric] for s in sub],
@@ -163,10 +181,14 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0):
                 if not HIGHER_IS_BETTER.get(metric, True) and np.isfinite(r):
                     r, lo, hi = -r, (-hi if np.isfinite(hi) else np.nan), \
                                 (-lo if np.isfinite(lo) else np.nan)
+                if not np.isfinite(r) and operator not in notes:
+                    notes[operator] = ("cases exist but a value was constant, so the "
+                                       "correlation is undefined — the perturbation did "
+                                       "not move this metric or this cost at all.")
                 blind = (not np.isfinite(r)) or (np.isfinite(lo) and lo < 0 < hi)
                 findings.append(dict(
                     cost=cost, operator=operator, metric=metric, n=len(sub),
                     aligned_rho=r, ci_lo=lo, ci_hi=hi, blind=bool(blind),
                     anti=bool(np.isfinite(r) and r < -0.2 and not blind)))
     return dict(n_cases=len(rows), n_units=len(units),
-                has_ci=len(units) >= 3, findings=findings, skipped=skipped)
+                has_ci=len(units) >= 3, findings=findings, notes=notes)

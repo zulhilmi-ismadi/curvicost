@@ -117,11 +117,8 @@ def _audit_report(result, stream):
                   "Spur pruning is an\n     ABSOLUTE pixel length, so results are not "
                   "comparable across datasets sampled at\n     different resolutions "
                   "unless you match this ratio.", file=stream)
-    if result.get("skipped"):
-        detail = ", ".join(f"{op} ({n} case{'s' if n != 1 else ''})"
-                           for op, n in sorted(result["skipped"].items()))
-        print(f"\n⚠  skipped for too few cases (need 3+ per operator): {detail}."
-              "\n   Pass more values to --severities, or raise --seeds.", file=stream)
+    for op, why in sorted(result.get("notes", {}).items()):
+        print(f"\n⚠  {op}: {why}", file=stream)
     if not result["findings"]:
         print("\nNo correlations could be computed. See above.", file=stream)
         return
@@ -162,7 +159,8 @@ def _cmd_audit(args):
         rows += sweep(mask, severities=severities, seeds=seeds,
                       prune_px=args.prune_px, with_erl=not args.no_erl,
                       unit=str(path))
-    result = audit(rows, n_boot=args.n_boot)
+    attempted = [op for op in severities if severities.get(op)]
+    result = audit(rows, n_boot=args.n_boot, attempted=attempted)
     if scales:
         radii = [s["median_radius"] for s in scales]
         ratios = [s["prune_in_radii"] for s in scales]
