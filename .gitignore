@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+*.whl
+
+# Notebooks
+.ipynb_checkpoints/
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
