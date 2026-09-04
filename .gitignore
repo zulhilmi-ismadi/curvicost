@@ -19,3 +19,6 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+
+# Tutorial output
+notebooks/blindness.csv
