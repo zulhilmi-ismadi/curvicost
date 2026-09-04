@@ -3,9 +3,16 @@ name: publish to PyPI
 # Trusted Publishing: no API token is stored anywhere. PyPI trusts a signed
 # OIDC token from THIS workflow, in THIS repository, running in the `pypi`
 # environment. Configure the publisher once on pypi.org (see README).
+#
+# Two ways to run:
+#   - push a tag v*        -> build, check, PUBLISH
+#   - "Run workflow" button -> build, check, and VERIFY the trust with PyPI
+#                              without uploading anything (the minted token
+#                              is discarded; it expires within minutes)
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -15,20 +22,46 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Tag must match the package version
+      - name: Tag must match the package version (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          python -m pip install tomli 2>/dev/null || true
-          PKG=$(python -c "import tomllib,sys; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          PKG=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           TAG="${GITHUB_REF_NAME#v}"
           test "$PKG" = "$TAG" || { echo "pyproject version $PKG != tag $TAG"; exit 1; }
       - name: Build sdist and wheel
-        run: python -m pip install build && python -m build
+        run: python -m pip install build twine && python -m build && python -m twine check dist/*
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
 
+  verify-trust:
+    # Manual runs only. Asks GitHub for this job's OIDC identity and presents
+    # it to PyPI's token-minting endpoint, which is precisely what a publish
+    # does first. Success means the publisher on pypi.org matches this
+    # repository, workflow and environment. Nothing is uploaded.
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Mint (and discard) a PyPI token from this workflow's identity
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                 "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pypi" | jq -r .value)
+          RESP=$(curl -sS -X POST https://pypi.org/_/oidc/mint-token \
+                 -H "Content-Type: application/json" -d "{\"token\":\"$OIDC\"}")
+          if echo "$RESP" | jq -e '.token' >/dev/null 2>&1; then
+            echo "PyPI accepted this workflow's identity: Trusted Publishing is configured correctly."
+          else
+            echo "PyPI REJECTED the identity. Response:"; echo "$RESP" | jq . || echo "$RESP"; exit 1
+          fi
+
   publish:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
