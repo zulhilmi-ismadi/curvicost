@@ -173,6 +173,22 @@ anisotropic voxels.
 pip install "curvicost[test]" && pytest
 ```
 
+## Releasing
+
+Releases are published by GitHub Actions through PyPI's Trusted Publishing, so no
+API token is stored anywhere. One-time setup on pypi.org → project `curvicost` →
+Publishing → add a GitHub publisher with owner `zulhilmi-ismadi`, repository
+`curvicost`, workflow `publish.yml`, environment `pypi`; and on GitHub create the
+`pypi` environment under Settings → Environments.
+
+To release: bump `version` in `pyproject.toml`, commit, then
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The workflow refuses to publish if the tag and the package version disagree.
+
 ## Licence
 
 MIT.
