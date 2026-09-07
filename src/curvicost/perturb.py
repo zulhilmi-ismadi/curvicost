@@ -2,7 +2,9 @@
 
 Five operators, each isolating one kind of mistake a segmenter actually makes:
 
-  break     cut branches (connectivity lost, few voxels moved)
+  break     cut branches (connectivity lost, few voxels moved); every cut is
+            verified to sever in a local crop, and `info["unsevered"]`
+            counts any that could not be
   bridge    join branches that do not touch (connectivity invented)
   truncate  shorten branch endpoints (extent lost)
   radius    thicken or thin uniformly (geometry wrong, topology intact)

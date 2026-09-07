@@ -14,7 +14,8 @@ from . import __version__
 from .io import load_mask, save_mask, voxel_size_of
 
 _METRIC_ORDER = ("dice", "iou", "cldice", "betti0_error", "erl_frac", "diadem_like")
-_COST_ORDER = ("traceable_frac", "conductance_frac", "perfused_of_self")
+_COST_ORDER = ("traceable_frac", "traceable_single_frac", "conductance_frac",
+               "perfused_of_self")
 
 
 def _fmt(value):
@@ -25,15 +26,15 @@ def _fmt(value):
 
 def _report(row, stream):
     """Human-readable output: metrics beside costs, which is the whole point."""
-    print("metric                 value   |  cost                    value", file=stream)
-    print("-" * 66, file=stream)
+    print("metric                 value   |  cost                      value", file=stream)
+    print("-" * 68, file=stream)
     left = [(k, row[k]) for k in _METRIC_ORDER if k in row]
     right = [(k, row[k]) for k in _COST_ORDER if k in row]
     for i in range(max(len(left), len(right))):
         lk, lv = left[i] if i < len(left) else ("", "")
         rk, rv = right[i] if i < len(right) else ("", "")
         lcell = f"{lk:<18} {_fmt(lv):>8}" if lk else " " * 27
-        rcell = f"{rk:<20} {_fmt(rv):>8}" if rk else ""
+        rcell = f"{rk:<22} {_fmt(rv):>8}" if rk else ""
         print(f"{lcell}   |  {rcell}".rstrip(), file=stream)
 
 
@@ -72,7 +73,8 @@ def _cmd_score(args):
     return 0
 
 
-_COST_LABEL = {"traceable_frac": "traceable length", "conductance_frac": "conductance"}
+_COST_LABEL = {"traceable_frac": "traceable length (reachable reference skeleton)",
+               "conductance_frac": "conductance (Kirchhoff, fixed reference sinks)"}
 
 
 def _audit_report(result, stream):
@@ -98,8 +100,10 @@ def _audit_report(result, stream):
                 f = next((f for f in result["findings"]
                           if f["cost"] == cost and f["operator"] == op
                           and f["metric"] == m), None)
-                if f is None or f["aligned_rho"] != f["aligned_rho"]:
+                if f is None:
                     cells += "         --"
+                elif f.get("undefined") or f["aligned_rho"] != f["aligned_rho"]:
+                    cells += "      undef"
                 else:
                     mark = "*" if f["blind"] else ("!" if f["anti"] else " ")
                     cells += f"{f['aligned_rho']:>+10.2f}{mark}"
@@ -124,16 +128,20 @@ def _audit_report(result, stream):
         return
     blind = [f for f in result["findings"] if f["blind"]]
     anti = [f for f in result["findings"] if f["anti"]]
+    undef = [f for f in result["findings"] if f.get("undefined")]
     print(f"\n  * CI includes zero — blind to that error type   ({len(blind)} of "
           f"{len(result['findings'])} combinations)", file=stream)
     print(f"  ! anti-correlates — the metric moves the WRONG WAY   ({len(anti)})",
           file=stream)
+    if undef:
+        print(f"  undef  the cost (or the metric) did not move under that operator, so ρ "
+              f"is undefined   ({len(undef)})", file=stream)
     if anti:
         worst = min(anti, key=lambda f: f["aligned_rho"])
         print(f"    worst: {worst['metric']} vs {_COST_LABEL.get(worst['cost'])} on "
-              f"{worst['operator']} (ρ {worst['aligned_rho']:+.2f}). A cost that a "
-              f"perturbation\n    can IMPROVE is the wrong cost for that error type — "
-              "no metric choice fixes it.", file=stream)
+              f"{worst['operator']} (ρ {worst['aligned_rho']:+.2f}). When the metric "
+              f"moves the wrong way on an\n    error type, check first whether the "
+              "cost is the right one for that error type.", file=stream)
 
 
 def _cmd_audit(args):

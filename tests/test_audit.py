@@ -159,3 +159,24 @@ def test_declined_operator_is_explained(tree2d):
     res = audit(rows, n_boot=20, attempted=["bridge"])
     assert rows == [] or all(r["operator"] != "bridge" for r in rows)
     assert "bridge" in res["notes"] and "declined" in res["notes"]["bridge"]
+
+
+def test_cost_that_does_not_move_is_undefined_not_blind(twotrees):
+    """Reachable length counts reference voxels, so a bridge between two
+    reference fragments cannot change it. The audit must report those cells as
+    undefined -- a statement about the cost -- and not as metric blindness."""
+    rows = sweep(twotrees, severities={"bridge": (0.1, 0.3, 0.5)}, unit="t")
+    assert len(rows) >= 3, "fixture no longer admits three bridge cases"
+    res = audit(rows, n_boot=20, attempted=["bridge"])
+    cells = [f for f in res["findings"] if f["cost"] == "traceable_frac"]
+    assert cells and all(f["undefined"] for f in cells)
+    assert not any(f["blind"] for f in cells)
+    assert "did not move" in res["notes"]["bridge"]
+
+
+def test_cli_renders_undefined_cells(tmp_path, twotrees, capsys):
+    from curvicost.io import save_mask
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    main(["audit", str(p), "--severities", "0.1,0.3,0.5", "--n-boot", "20"])
+    out = capsys.readouterr().out
+    assert "undef" in out

@@ -20,7 +20,7 @@ import numpy as np
 from scipy.stats import ConstantInputWarning, spearmanr
 
 from .perturb import perturb, OPERATORS
-from .score import score
+from .score import score, prepare_reference
 
 __all__ = ["audit", "sweep", "scale_report", "DEFAULT_SEVERITIES", "COSTS"]
 
@@ -78,7 +78,8 @@ def sweep(mask, *, severities=None, seeds=(0,), prune_px=5, with_erl=True,
     """
     severities = severities or DEFAULT_SEVERITIES
     mask = np.asarray(mask).astype(bool)
-    radius_ref = None
+    radius_ref = radius_ctx = None
+    ctx = prepare_reference(mask, prune_px=prune_px, with_erl=with_erl)
     rows = []
 
     for operator in OPERATORS:
@@ -92,14 +93,22 @@ def sweep(mask, *, severities=None, seeds=(0,), prune_px=5, with_erl=True,
                 if operator == "radius":
                     if radius_ref is None:
                         radius_ref, _ = perturb(mask, "radius", 1.0, prune_px=prune_px)
-                    reference = radius_ref
+                        radius_ctx = prepare_reference(radius_ref, prune_px=prune_px,
+                                                       with_erl=with_erl)
+                    reference, ref_ctx = radius_ref, radius_ctx
                 else:
-                    reference = mask
+                    reference, ref_ctx = mask, ctx
                 if np.array_equal(out, reference):
                     continue          # operator declined; not a data point
-                row = score(reference, out, with_erl=with_erl, prune_px=prune_px)
+                row = score(reference, out, with_erl=with_erl, prune_px=prune_px,
+                            reference=ref_ctx)
+                # What the operator actually did, so the audit can tell a real
+                # severity ladder from one that saturated on a small population.
+                realised = info.get("n_broken", info.get("n_bridges",
+                           info.get("n_truncated", info.get("voxels_moved", None))))
                 row.update(unit=unit, operator=operator, severity=float(sev),
-                           seed=int(seed))
+                           seed=int(seed), realised=realised,
+                           population=info.get("population", None))
                 rows.append(row)
                 if on_case is not None:
                     on_case(row)
@@ -149,23 +158,29 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
     tracks this cost", whichever direction the raw metric runs.
     """
     attempted = tuple(OPERATORS if attempted is None else attempted)
-    notes = {}
+    notes = {}                       # operator -> list of reasons; joined on return
+
+    def note(operator, why):
+        if why not in notes.setdefault(operator, []):
+            notes[operator].append(why)
+
     for operator in attempted:
         # Explain every operator that cannot produce a number. A blank column
         # with no reason is indistinguishable from a bug, and one of these
         # reasons IS effectively a bug in the caller's setup.
         n = sum(1 for r in rows if r["operator"] == operator)
         if n == 0:
-            notes[operator] = ("produced no cases — the operator declined on every "
-                               "severity. `bridge` needs two skeleton tips within "
-                               "max_gap (12 px, an ABSOLUTE length) but far apart in "
-                               "the graph; on thick or heavily pruned structures no "
-                               "such pair exists.")
+            note(operator, "produced no cases — the operator declined on every "
+                           "severity. `bridge` needs two skeleton tips within "
+                           "max_gap (12 px, an ABSOLUTE length) but far apart in "
+                           "the graph; on thick or heavily pruned structures no "
+                           "such pair exists.")
         elif n < 3:
-            notes[operator] = (f"only {n} case(s) — needs 3+ to correlate. Pass more "
-                               "values to --severities or raise --seeds.")
+            note(operator, f"only {n} case(s) — needs 3+ to correlate. Pass more "
+                           "values to --severities or raise --seeds.")
+    joined = lambda: {op: " ".join(why) for op, why in notes.items()}
     if not rows:
-        return dict(n_cases=0, n_units=0, has_ci=False, findings=[], notes=notes)
+        return dict(n_cases=0, n_units=0, has_ci=False, findings=[], notes=joined())
     units = sorted({r["unit"] for r in rows})
     metrics = [m for m in METRIC_ORDER if m in rows[0]]
     findings = []
@@ -174,6 +189,34 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
             sub = [r for r in rows if r["operator"] == operator]
             if len(sub) < 3:
                 continue
+            cost_vals = np.asarray([s[cost] for s in sub], float)
+            cost_vals = cost_vals[np.isfinite(cost_vals)]
+            # A cost the operator does not move (reachable length under `bridge`:
+            # every reference voxel stays reachable, the fraction sits at 1.0) makes
+            # every correlation undefined. That is a statement about the COST, not
+            # about any metric, so it is reported as its own category rather than
+            # as blindness.
+            cost_constant = len(np.unique(cost_vals)) < 2
+            # Severity is a fraction of the operator's eligible population. On a
+            # small population the ladder saturates -- every severity rounds to
+            # the same count -- and the "cases" are one mask scored repeatedly.
+            realised = [(r["unit"], r.get("realised")) for r in sub if r.get("realised") is not None]
+            distinct = len(set(realised))
+            # Flag only real saturation (half or more of the cases are repeats), not
+            # the odd coincidence of two boundary draws moving the same voxel count.
+            if realised and distinct <= len(sub) // 2:
+                units_with = sorted({u for u, _ in realised})
+                note(operator, f"{len(sub)} cases but only {distinct} distinct realisation(s): "
+                               f"the severity ladder saturated on a small eligible population "
+                               f"(units with cases: {', '.join(str(u).rsplit('/', 1)[-1] for u in units_with)}). "
+                               "Correlations over repeated copies of one mask are not evidence.")
+            if cost_constant:
+                note(operator, f"{cost} did not move under this operator (constant at "
+                               f"{cost_vals[0]:.3g}), so every correlation against it is "
+                               "undefined. This is a property of the cost, not of any "
+                               "metric: a cost that an error type cannot change is the "
+                               "wrong cost for that error type." if len(cost_vals) else
+                               f"{cost} is undefined on every case for this operator.")
             for metric in metrics:
                 r, lo, hi = _bootstrap([s[metric] for s in sub],
                                        [s[cost] for s in sub],
@@ -181,14 +224,16 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
                 if not HIGHER_IS_BETTER.get(metric, True) and np.isfinite(r):
                     r, lo, hi = -r, (-hi if np.isfinite(hi) else np.nan), \
                                 (-lo if np.isfinite(lo) else np.nan)
-                if not np.isfinite(r) and operator not in notes:
-                    notes[operator] = ("cases exist but a value was constant, so the "
-                                       "correlation is undefined — the perturbation did "
-                                       "not move this metric or this cost at all.")
-                blind = (not np.isfinite(r)) or (np.isfinite(lo) and lo < 0 < hi)
+                undefined = not np.isfinite(r)
+                if undefined and not cost_constant:
+                    note(operator, f"{metric} was constant under this operator, so its "
+                                   "correlation is undefined — the perturbation did not "
+                                   "move that metric at all.")
+                blind = (not undefined) and np.isfinite(lo) and lo < 0 < hi
                 findings.append(dict(
                     cost=cost, operator=operator, metric=metric, n=len(sub),
                     aligned_rho=r, ci_lo=lo, ci_hi=hi, blind=bool(blind),
-                    anti=bool(np.isfinite(r) and r < -0.2 and not blind)))
+                    anti=bool(np.isfinite(r) and r < -0.2 and not blind),
+                    undefined=bool(undefined), cost_constant=bool(cost_constant)))
     return dict(n_cases=len(rows), n_units=len(units),
-                has_ci=len(units) >= 3, findings=findings, notes=notes)
+                has_ci=len(units) >= 3, findings=findings, notes=joined())

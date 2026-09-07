@@ -55,20 +55,56 @@ def test_break_costs_more_than_it_looks(tree2d):
     )
 
 
-def test_liberal_prediction_can_exceed_reference(tree2d):
-    """traceable_frac > 1 is meaningful, not a bug: a more liberal mask can be
-    more traceable than the reference (STARE's two annotators differ by 1.95)."""
+def test_dilation_keeps_reachable_length(tree2d):
+    """A more liberal mask keeps every reference voxel reachable: reachable
+    length stays at 1.0 while Dice falls. (Under the superseded graph-based
+    definition this read as traceable_frac > 1; the reach cost counts reference
+    voxels and is bounded by 1 by construction.)"""
     from scipy import ndimage
     fatter = ndimage.binary_dilation(tree2d, iterations=1)
     row = curvicost.score(tree2d, fatter)
-    # Dice punishes the extra voxels hard; the function is almost untouched.
-    dice_loss = 1.0 - row["dice"]
-    trace_loss = 1.0 - row["traceable_frac"]
-    assert dice_loss > 0.1, "expected dilation to move enough voxels to hurt Dice"
-    assert trace_loss < dice_loss / 4, (
-        f"expected function to survive dilation; "
-        f"dice_loss={dice_loss:.4f} trace_loss={trace_loss:.4f}"
-    )
+    assert 1.0 - row["dice"] > 0.1, "expected dilation to move enough voxels to hurt Dice"
+    assert row["traceable_frac"] == pytest.approx(1.0, abs=1e-9)
+    assert row["traceable_single_frac"] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_reachable_length_is_bounded_by_one(twotrees):
+    """No prediction can be more reachable than the reference under the
+    multi-root cost of record. The single-source variant is NOT bounded: a
+    bridge between two reference fragments lets one source reach the other
+    fragment, and on a fragmented reference that reads as a gain -- which is
+    precisely why the study traces every reference component from its own root."""
+    from scipy import ndimage
+    preds = [ndimage.binary_dilation(twotrees, iterations=2),
+             curvicost.perturb(twotrees, "bridge", 0.5, seed=0)[0],
+             curvicost.perturb(twotrees, "boundary", 0.1, seed=0)[0]]
+    for pred in preds:
+        row = curvicost.score(twotrees, pred)
+        assert row["traceable_frac"] <= 1.0 + 1e-12
+    bridged = curvicost.score(twotrees, preds[1])
+    assert bridged["traceable_frac"] == pytest.approx(1.0, abs=1e-12)
+    assert bridged["traceable_single_frac"] > 1.0, "twotrees has two components; a bridge joins them"
+
+
+def test_break_is_verified_to_sever(tree2d):
+    """Every cut the break operator reports must actually disconnect the mask,
+    and the engine must say when one could not (info["unsevered"])."""
+    broken, info = curvicost.perturb(tree2d, "break", 0.5, seed=0)
+    assert info["n_broken"] >= 1
+    assert info["unsevered"] == 0
+    row = curvicost.score(tree2d, broken)
+    assert row["betti0_error"] >= 1
+    assert row["traceable_frac"] < 1.0
+
+
+def test_bridge_does_not_read_as_a_flow_loss(twotrees):
+    """Kirchhoff conductance is a resistor-network quantity: adding a path can
+    never lower it (Rayleigh monotonicity). Under the superseded path-sum a
+    bridge read as a 41% conductance loss on the study data."""
+    bridged, info = curvicost.perturb(twotrees, "bridge", 0.2, seed=0)
+    assert info["n_bridges"] >= 1
+    row = curvicost.score(twotrees, bridged)
+    assert row["conductance_frac"] >= 1.0 - 1e-6, row["conductance_frac"]
 
 
 def test_bridge_scores_well_but_merges_components(twotrees):
