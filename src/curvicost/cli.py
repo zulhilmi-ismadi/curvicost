@@ -198,6 +198,66 @@ def _cmd_audit(args):
     return 0
 
 
+def _cmd_profile(args):
+    import json as _json
+    import numpy as np
+    from .profile import profile
+
+    gt, _ = load_mask(args.gt)
+    rows = []
+    for path in args.predictions:
+        pred, _ = load_mask(path)
+        if pred.shape != gt.shape:
+            print(f"curvicost: {path} has shape {pred.shape}, reference has {gt.shape}; skipped",
+                  file=sys.stderr)
+            continue
+        if not args.quiet:
+            print(f"profiling {path} ...", file=sys.stderr, flush=True)
+        r = profile(gt, pred, prune_px=args.prune_px, seed=args.seed, seeds=args.seeds)
+        r["prediction"] = str(path)
+        rows.append(r)
+    if not rows:
+        print("curvicost: nothing to profile", file=sys.stderr)
+        return 2
+    if args.json:
+        with open(args.json, "w") as fh:
+            _json.dump(rows, fh, indent=2, default=float)
+    if not args.quiet:
+        _profile_report(rows, sys.stdout)
+    return 0
+
+
+def _profile_report(rows, stream):
+    """Which error types does this method make, and how much is outside the model?"""
+    from .audit import OPERATORS
+    print(f"\n{len(rows)} prediction(s) of ONE method against one reference\n", file=stream)
+    print("  " + "prediction".ljust(26) + "".join(o.rjust(10) for o in OPERATORS)
+          + "  unexplained", file=stream)
+    flagged = False
+    for r in rows:
+        name = str(r["prediction"]).rsplit("/", 1)[-1]
+        cells = "".join(f"{100 * r['shares'].get(o, 0.0):>9.0f}%" for o in OPERATORS)
+        mark = " +" if r["residual"] > 0.30 else "  "
+        flagged |= r["residual"] > 0.30
+        print("  " + name[:26].ljust(26) + cells + f"{100 * r['residual']:>10.0f}%{mark}", file=stream)
+    if len(rows) > 1:
+        mean = {o: sum(r["shares"].get(o, 0.0) for r in rows) / len(rows) for o in OPERATORS}
+        resid = sum(r["residual"] for r in rows) / len(rows)
+        print("  " + "MEAN".ljust(26) + "".join(f"{100 * mean[o]:>9.0f}%" for o in OPERATORS)
+              + f"{100 * resid:>10.0f}%", file=stream)
+        lead = max(mean, key=mean.get)
+    else:
+        lead = rows[0]["nearest"]
+    print(f"\n  Read the '{lead}' column of `curvicost audit` first: it is the error type these\n"
+          f"  predictions most resemble on this data. Shares are coarse -- read them as\n"
+          f"  \"mostly {lead}-like\", not as a measurement.", file=stream)
+    if flagged:
+        print("\n  + more than 30% of the disagreement is explained by no combination of the five\n"
+              "    operators. The commonest cause is over-tracing: only `bridge` adds structure,\n"
+              "    so a method that paints more than the reference falls outside the model and the\n"
+              "    audit's columns describe it only in part.", file=stream)
+
+
 def _cmd_perturb(args):
     from .perturb import perturb
 
@@ -250,6 +310,17 @@ def build_parser():
     p.add_argument("-o", "--output", required=True, help="where to write the result")
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=_cmd_perturb)
+
+    pr = subs.add_parser("profile", help="which error types does your method make?")
+    pr.add_argument("predictions", nargs="+", help="predicted masks from the method under test")
+    pr.add_argument("--gt", "--reference", required=True, dest="gt", help="reference binary mask")
+    pr.add_argument("--json", metavar="PATH", help="write the full profile as JSON")
+    pr.add_argument("--prune-px", type=int, default=5, metavar="N")
+    pr.add_argument("--seed", type=int, default=0, help="first seed for the calibration perturbations")
+    pr.add_argument("--seeds", type=int, default=3, metavar="N",
+                    help="realisations of each operator to average into the basis (default 3)")
+    pr.add_argument("--quiet", action="store_true")
+    pr.set_defaults(func=_cmd_profile)
 
     a = subs.add_parser("audit", help="which error types is your metric blind to?")
     a.add_argument("masks", nargs="+", help="reference binary masks (3+ for CIs)")

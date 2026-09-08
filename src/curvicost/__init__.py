@@ -26,9 +26,10 @@ __version__ = "0.2.0"
 from .score import score, prepare_reference, METRIC_COLUMNS, COST_COLUMNS
 from .perturb import perturb, OPERATORS
 from .audit import audit, sweep
+from .profile import profile
 from .io import load_mask, save_mask
 
 __all__ = [
-    "score", "prepare_reference", "perturb", "audit", "sweep", "load_mask", "save_mask",
+    "score", "prepare_reference", "perturb", "audit", "sweep", "profile", "load_mask", "save_mask",
     "METRIC_COLUMNS", "COST_COLUMNS", "OPERATORS", "__version__",
 ]

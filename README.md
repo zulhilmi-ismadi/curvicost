@@ -111,6 +111,55 @@ without CIs and says so rather than inventing them. Each operator also needs
 at least three severities; it names any it had to skip, and any whose severity
 ladder saturated on a small eligible population.
 
+## Which error types does *your* method make?
+
+The audit tells you which metric to distrust for each error type. Acting on it
+needs one more thing the audit cannot supply: knowing which error types your own
+method produces, because a real prediction is a mixture and arrives unlabelled.
+`profile` estimates the mixture — it expresses the disagreement as non-negative
+shares of the five operators, calibrated on **your** reference at the severity
+whose total disagreement matches:
+
+```bash
+curvicost profile pred1.png pred2.png --gt reference.png --json profile.json
+```
+
+```
+1 prediction(s) of ONE method against one reference
+
+  prediction                     break    bridge  truncate    radius  boundary  unexplained
+  annotator2.npy                    6%       32%        0%       37%       25%        37% +
+
+  Read the 'radius' column of `curvicost audit` first: it is the error type these
+  predictions most resemble on this data. Shares are coarse -- read them as
+  "mostly radius-like", not as a measurement.
+
+  + more than 30% of the disagreement is explained by no combination of the five
+    operators. The commonest cause is over-tracing: only `bridge` adds structure,
+    so a method that paints more than the reference falls outside the model and the
+    audit's columns describe it only in part.
+```
+
+(STARE im0077, the second expert annotator scored against the first.)
+
+Pass predictions from **one** method; the mean row is meaningless across
+different methods. Each pair is reduced to a signature of seven quantities the
+operators move differently — voxels removed, voxels added, change in component
+count, merged fraction, reachable-length loss, median-radius ratio and terminal
+loss — and the observed signature is fitted as a non-negative combination of the
+five operator signatures. Each basis signature averages three realisations of
+its operator (`--seeds`), because one draw is not the operator: at a fixed break
+severity, which edges the draw happens to cut moves the reachable-length loss by
+a factor of five.
+
+**Read `unexplained` first.** It is the part of the disagreement that no
+combination of the five operators reproduces. Handed a prediction that *is* one
+operator, the profiler names it in 86 of 93 cases across 20 fundus images; on
+real methods the residual is much larger, and a large residual means the model
+does not span what your method does. The shares are still the right place to
+start reading the audit, but they are not the whole error.
+
+
 ## What it measures
 
 **Metrics** — Dice, IoU, clDice, Betti-0 error, expected run length (ERL),
@@ -230,7 +279,13 @@ traceable length inflated by re-skeletonised cut faces, and a path-sum
 conductance that charged a bridge as a flow loss). `traceable_frac` is now the
 multi-root reachable length and `conductance_frac` the Kirchhoff conductance
 described above; `traceable_single_frac` is new. Numbers from 0.1 are not
-comparable with numbers from 0.2 and must not be mixed in one table. The
+comparable with numbers from 0.2 and must not be mixed in one table.
+
+`audit` gained `--cost`, and now separates *inconclusive* (too few units to
+resolve a correlation) from *blind* (resolved, and the interval covers zero).
+`profile` is new: it names which of the five error types a method's own
+predictions resemble, which is what makes "stratify by error type" something a
+user can act on rather than advice. The
 vendored engine is byte-identical to the study's code, and
 `tests/test_reproduces_study.py` re-scores study cases against the archived
 tables to 10⁻⁶.
