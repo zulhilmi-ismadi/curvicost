@@ -10,6 +10,7 @@ def test_identity_is_perfect(tree2d):
     assert row["iou"] == pytest.approx(1.0)
     assert row["traceable_frac"] == pytest.approx(1.0, abs=1e-9)
     assert row["conductance_frac"] == pytest.approx(1.0, abs=1e-9)
+    assert row["conductance_twosided"] == pytest.approx(1.0, abs=1e-9)
     assert row["betti0_error"] == 0
 
 
@@ -105,6 +106,34 @@ def test_bridge_does_not_read_as_a_flow_loss(twotrees):
     assert info["n_bridges"] >= 1
     row = curvicost.score(twotrees, bridged)
     assert row["conductance_frac"] >= 1.0 - 1e-6, row["conductance_frac"]
+
+
+def test_two_sided_conductance_charges_excess(tree2d):
+    """A thicker prediction conducts more than the reference (raw fraction > 1);
+    the reported cost treats that excess as loss, symmetrically in log space."""
+    from scipy import ndimage
+    fatter = ndimage.binary_dilation(tree2d, iterations=2)
+    row = curvicost.score(tree2d, fatter)
+    assert row["conductance_frac"] > 1.0
+    assert row["conductance_twosided"] == pytest.approx(1.0 / row["conductance_frac"], rel=1e-9)
+    assert row["conductance_twosided"] < 1.0
+
+
+def test_root_loss_does_not_zero_the_cost(tree2d):
+    """Truncating the branch that holds a component's root must not count the whole
+    component as unreachable: the component is traced from its nearest surviving
+    reference-skeleton voxel instead (study v7 root fallback)."""
+    from scipy import ndimage
+    from skimage.morphology import skeletonize
+    from curvicost._core.reach import ref_roots_for
+    skel = skeletonize(tree2d)
+    ref_lab, roots = ref_roots_for(tree2d, skel, ndimage.distance_transform_edt(tree2d))
+    (root,) = roots.values()
+    pred = tree2d.copy()
+    r0, c0 = root
+    pred[max(r0 - 6, 0):r0 + 7, max(c0 - 6, 0):c0 + 7] = False     # punch out the root itself
+    row = curvicost.score(tree2d, pred)
+    assert row["traceable_frac"] > 0.3, row["traceable_frac"]
 
 
 def test_bridge_scores_well_but_merges_components(twotrees):

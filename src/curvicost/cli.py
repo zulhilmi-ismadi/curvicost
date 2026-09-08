@@ -14,8 +14,8 @@ from . import __version__
 from .io import load_mask, save_mask, voxel_size_of
 
 _METRIC_ORDER = ("dice", "iou", "cldice", "betti0_error", "erl_frac", "diadem_like")
-_COST_ORDER = ("traceable_frac", "traceable_single_frac", "conductance_frac",
-               "perfused_of_self")
+_COST_ORDER = ("traceable_frac", "traceable_single_frac", "conductance_twosided",
+               "conductance_frac", "perfused_of_self")
 
 
 def _fmt(value):
@@ -74,7 +74,8 @@ def _cmd_score(args):
 
 
 _COST_LABEL = {"traceable_frac": "traceable length (reachable reference skeleton)",
-               "conductance_frac": "conductance (Kirchhoff, fixed reference sinks)"}
+               "conductance_twosided": "conductance (Kirchhoff, two-sided: excess is loss)",
+               "conductance_frac": "conductance (Kirchhoff, raw fraction retained)"}
 
 
 def _audit_report(result, stream):

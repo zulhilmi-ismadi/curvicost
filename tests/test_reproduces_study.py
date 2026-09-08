@@ -4,8 +4,8 @@
 package *composes* that engine the way the study scripts do -- same reference
 handling, same fixed sinks, same pinned source, same reference-skeleton reach,
 same ERL reference -- by re-scoring cases whose answers are already on disk in
-`results/realistic_errors_stare_v6.parquet` (the study's data of record; the
-v5 table is superseded and must not be matched).
+`results/realistic_errors_stare_v7.parquet` (the study's data of record: v6 costs
+with the root fallback and the two-sided conductance; earlier tables are superseded).
 
 Skipped when the study tree is absent (i.e. installed from a wheel).
 """
@@ -15,7 +15,7 @@ import pytest
 
 _HERE = pathlib.Path(__file__).resolve()
 STUDY = _HERE.parents[2]
-PARQUET = STUDY / "results" / "realistic_errors_stare_v6.parquet"
+PARQUET = STUDY / "results" / "realistic_errors_stare_v7.parquet"
 LABELS = STUDY / "data" / "stare"
 
 pytestmark = pytest.mark.skipif(
@@ -34,6 +34,7 @@ COLUMNS = {
     "traceable_ms_frac": "traceable_frac",          # cost of record: multi-root reach
     "traceable_frac": "traceable_single_frac",      # single pinned source
     "conductance_frac": "conductance_frac",         # Kirchhoff, fixed reference sinks
+    "conductance_twosided": "conductance_twosided", # the reported flow cost, min(c, 1/c)
 }
 
 

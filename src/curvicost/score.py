@@ -4,7 +4,7 @@ The point of this package is the second column. Dice tells you how many voxels
 you got; it does not tell you what the errors cost the biology. `score()`
 returns both, from one pass, so the two can be compared on the same case.
 
-The cost definitions are the study's (its "v6" data of record, 2026-09-08),
+The cost definitions are the study's (its "v7" data of record, 2026-09-08),
 composed here exactly as the study's re-score script composes them:
 
 * **Reachable length** (`traceable_frac`). The reference is skeletonised once.
@@ -15,11 +15,15 @@ composed here exactly as the study's re-score script composes them:
   "more reachable" than the reference, and a spurious bridge between two
   reference fragments adds nothing (their voxels were already counted). The
   single-source variant, traced from one pinned source, is `traceable_single_frac`.
-* **Conductance** (`conductance_frac`). A Kirchhoff (resistor-network) solve on
-  the prediction's own skeleton graph: unit pressure at the source, zero at every
-  surviving reference sink, resistance integrated pixel by pixel from the
-  distance transform as 1/r^4. Adding an edge can never lower it (Rayleigh
-  monotonicity), so a bridge is not charged as a flow loss.
+* **Conductance** (`conductance_twosided`, with the raw fraction as
+  `conductance_frac`). A Kirchhoff (resistor-network) solve on the prediction's
+  own skeleton graph: unit pressure at the source, zero at every surviving
+  reference sink, resistance integrated pixel by pixel from the distance
+  transform as 1/r^4. Adding an edge can never lower the raw fraction (Rayleigh
+  monotonicity), so a bridge or a thicker prediction pushes it ABOVE 1. The
+  reported cost folds that excess into loss symmetrically in log space,
+  min(c, 1/c): a prediction carrying three times the reference flow is as wrong
+  as one carrying a third, and a false connection is a cost, not a gain.
 
 Four invariants are load-bearing and must not be "optimised" away:
 
@@ -57,7 +61,8 @@ METRIC_COLUMNS = (
     "erl", "erl_frac", "merged_frac", "diadem_like",
 )
 COST_COLUMNS = (
-    "traceable_frac", "traceable_single_frac", "conductance_frac", "perfused_of_self",
+    "traceable_frac", "traceable_single_frac", "conductance_twosided", "conductance_frac",
+    "perfused_of_self",
     "traceable_length", "conductance", "traceable_length_ref", "conductance_ref",
 )
 
@@ -93,7 +98,7 @@ def prepare_reference(gt, *, prune_px=5, with_erl=True, reference_skeleton=None)
     edt = ndimage.distance_transform_edt(gt)
     ref_lab, roots = ref_roots_for(gt, skel, edt)
     base_multi = reach_count_multi(gt, skel, ref_lab, roots)
-    base_single = reach_count(gt, skel, src_pos) if src_pos is not None else 0
+    base_single = reach_count(gt, skel, src_pos, ref_lab=ref_lab) if src_pos is not None else 0
 
     erl_ref = None
     if with_erl:
@@ -168,10 +173,11 @@ def score(gt, pred, *, with_erl=True, prune_px=5, reference_skeleton=None,
         out["diadem_like"] = diadem_like_score(ctx["g_metric"], g_pred) if g_pred is not None else 1.0
 
     reach_multi = reach_count_multi(pred, skel, ctx["ref_lab"], ctx["roots"])
-    reach_single = (reach_count(pred, skel, ctx["src_pos"])
+    reach_single = (reach_count(pred, skel, ctx["src_pos"], ref_lab=ctx["ref_lab"])
                     if ctx["src_pos"] is not None else 0)
     cond = float(c.get("conductance_k", 0.0))
     k_ref = ctx["conductance_ref"]
+    cfrac = cond / k_ref if k_ref > 0 else float("nan")
     out.update(
         traceable_length=int(reach_multi),
         conductance=cond,
@@ -179,7 +185,8 @@ def score(gt, pred, *, with_erl=True, prune_px=5, reference_skeleton=None,
         conductance_ref=k_ref,
         traceable_frac=reach_multi / ctx["base_multi"] if ctx["base_multi"] > 0 else float("nan"),
         traceable_single_frac=reach_single / ctx["base_single"] if ctx["base_single"] > 0 else float("nan"),
-        conductance_frac=cond / k_ref if k_ref > 0 else float("nan"),
+        conductance_frac=cfrac,
+        conductance_twosided=(min(cfrac, 1.0 / cfrac) if cfrac > 0 else 0.0) if cfrac == cfrac else float("nan"),
         perfused_of_self=float(c.get("perfused_of_self", 0.0)),
     )
     return out

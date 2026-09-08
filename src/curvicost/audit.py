@@ -33,7 +33,7 @@ DEFAULT_SEVERITIES = {
     "radius":   (0.70, 0.85, 1.15, 1.30),
     "boundary": (0.005, 0.02, 0.05, 0.10, 0.20),
 }
-COSTS = ("traceable_frac", "conductance_frac")
+COSTS = ("traceable_frac", "conductance_twosided")
 
 #: False where a higher value means a WORSE segmentation, so its correlation
 #: must be negated before being read as "tracks the cost".

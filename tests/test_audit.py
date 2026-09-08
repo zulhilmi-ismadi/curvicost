@@ -25,7 +25,7 @@ def test_sweep_covers_every_operator(rows):
 
 def test_sweep_rows_carry_metrics_and_costs(rows):
     r = rows[0]
-    for key in ("dice", "cldice", "traceable_frac", "conductance_frac",
+    for key in ("dice", "cldice", "traceable_frac", "conductance_frac", "conductance_twosided",
                 "operator", "severity", "seed", "unit"):
         assert key in r, key
 
