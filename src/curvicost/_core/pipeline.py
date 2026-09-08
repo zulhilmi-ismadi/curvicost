@@ -22,7 +22,8 @@ from .skelgraph import skeleton_to_graph, prune_spurs
 from . import graphcost as gc
 
 
-def analyse(mask, prune_px=5, sink_positions=None, source_pos=None, source_positions_all=None):
+def analyse(mask, prune_px=5, sink_positions=None, source_pos=None, source_positions_all=None,
+            terminal_resistances=()):
     """mask -> (graph, source, costs).
 
     `sink_positions` fixes the perfusion targets to the reference's terminal
@@ -36,6 +37,12 @@ def analyse(mask, prune_px=5, sink_positions=None, source_pos=None, source_posit
     another trunk, raising conductance by 26% on STARE im0077 at 20% breaks
     (review panel v1, 2026-09-07). The reference itself is analysed with
     source_pos=None and its source position passed to every perturbed case.
+
+    `terminal_resistances` is a ladder of lumped terminal resistances for the
+    boundary-condition sensitivity (review panel v2, R7). The cost of record is
+    always the ideal-ground solve in `conductance_k`; each requested R_t is solved
+    on the SAME assembled network and returned, in order, in `conductance_k_bc`,
+    so a ladder costs one graph build and one extra linear solve per rung.
     """
     if mask.sum() == 0:
         return None, None, dict(traceable_length=0.0, conductance=0.0,
@@ -67,6 +74,9 @@ def analyse(mask, prune_px=5, sink_positions=None, source_pos=None, source_posit
         cond = gc.conductance_fixed_sinks(G, src, sink_positions)
         sinks = np.asarray(sink_positions, dtype=float)
     cond_k = gc.conductance_kirchhoff(G, src, sinks, mask=mask, radius_map=radius_map) if len(sinks) else 0.0
+    cond_k_bc = [gc.conductance_kirchhoff(G, src, sinks, mask=mask, radius_map=radius_map,
+                                          terminal_resistance=float(rt)) if len(sinks) else 0.0
+                 for rt in terminal_resistances]
     # multi-root: every reference component's root at unit pressure. Reference call
     # (source_positions_all=None) uses its own component roots and reports them.
     if source_positions_all is None:
@@ -81,6 +91,7 @@ def analyse(mask, prune_px=5, sink_positions=None, source_pos=None, source_posit
         traceable_length=trace,
         conductance=cond,
         conductance_k=cond_k,
+        conductance_k_bc=cond_k_bc,
         conductance_ms=cond_ms,
         source_positions_all=np.array([G.nodes[r]["pos"] for r in roots], dtype=float),
         total_length=total,

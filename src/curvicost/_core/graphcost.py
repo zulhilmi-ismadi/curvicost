@@ -240,7 +240,8 @@ def conductance_fixed_sinks(G, source, sink_positions, match_radius=8.0, eps=1e-
             total += 1.0 / dist[n]
     return float(total)
 
-def conductance_kirchhoff(G, source, sink_positions, mask=None, radius_map=None, match_radius=3.0, eps=1e-9, extra_sources=()):
+def conductance_kirchhoff(G, source, sink_positions, mask=None, radius_map=None, match_radius=3.0, eps=1e-9, extra_sources=(),
+                          terminal_resistance=0.0):
     """Effective hydraulic conductance from the source to the reference sinks by a
     Kirchhoff (Laplacian) solve on the skeleton graph: unit pressure at the source,
     zero pressure at every surviving sink, edge conductance r^4 / L (parallel edges
@@ -258,6 +259,17 @@ def conductance_kirchhoff(G, source, sink_positions, mask=None, radius_map=None,
     sink (it still exists); a terminal a break punched away loses it. This replaces
     the terminal-node-only rule, under which bridges read as a 41% conductance
     loss (review panel v1, 2026-09-07).
+
+    `terminal_resistance` is the boundary condition on the sinks (review panel v2,
+    R7). At the default 0.0 every surviving sink is an ideal ground held at zero
+    pressure, which is the model of record. Given a positive value R_t, the sinks
+    are instead free nodes that drain to a single common ground through a lumped
+    resistance R_t each -- the downstream bed the imaged network empties into. The
+    two limits bracket the physics: R_t -> 0 recovers the ideal ground, and a large
+    R_t makes the terminal beds, not the imaged vessels, the flow-limiting element,
+    so the cost stops discriminating between segmentations. Callers set R_t as a
+    multiple of the unit's own reference conductance (see code/run_bc_sensitivity.py)
+    so that the ladder is scale-free and fixed per unit rather than tuned per case.
     """
     if source not in G or len(sink_positions) == 0:
         return 0.0
@@ -373,13 +385,28 @@ def conductance_kirchhoff(G, source, sink_positions, mask=None, radius_map=None,
     sinks = [t for t in sink_ids if int(lab[t]) in src_comp and t not in src_idx]
     if not sinks:
         return 0.0
+    gnd = None
+    if terminal_resistance and float(terminal_resistance) > 0:
+        # lumped terminal beds: each surviving sink drains to ONE common ground through
+        # R_t, instead of being an ideal ground itself. The component restriction above
+        # already decided which sinks survive, so the ground touches only those.
+        g_t = 1.0 / float(terminal_resistance)
+        gnd = n
+        for t in sinks:
+            add(t, gnd, g_t)
+        n += 1
+        A = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
+        keep = np.append(keep, gnd)
     deg = np.asarray(A.sum(axis=1)).ravel()
     Lap = (sp.diags(deg) - A).tocsr()
     fixed = np.zeros(n, dtype=bool); pval = np.zeros(n)
     for x in src_idx:
         fixed[x] = True; pval[x] = 1.0
-    for t in sinks:
-        fixed[t] = True
+    if gnd is None:
+        for t in sinks:
+            fixed[t] = True
+    else:
+        fixed[gnd] = True                      # the sinks are now free nodes
     free = np.array([k for k in keep if not fixed[k]], dtype=int); fix = np.array([k for k in keep if fixed[k]], dtype=int)
     pres = pval.copy()
     if len(free):
