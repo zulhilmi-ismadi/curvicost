@@ -106,7 +106,8 @@ def _audit_report(result, stream):
                 elif f.get("undefined") or f["aligned_rho"] != f["aligned_rho"]:
                     cells += "      undef"
                 else:
-                    mark = "*" if f["blind"] else ("!" if f["anti"] else " ")
+                    mark = ("*" if f["blind"] else "?" if f.get("inconclusive")
+                            else "!" if f["anti"] else " ")
                     cells += f"{f['aligned_rho']:>+10.2f}{mark}"
             print("  " + m.ljust(14) + cells, file=stream)
 
@@ -137,6 +138,10 @@ def _audit_report(result, stream):
     if undef:
         print(f"  undef  the cost (or the metric) did not move under that operator, so ρ "
               f"is undefined   ({len(undef)})", file=stream)
+    incon = [f for f in result["findings"] if f.get("inconclusive")]
+    if incon:
+        print(f"  ? interval spans zero but there are only {result['n_units']} clustering unit(s) — "
+              f"INCONCLUSIVE, not blind   ({len(incon)})", file=stream)
     if anti:
         worst = min(anti, key=lambda f: f["aligned_rho"])
         print(f"    worst: {worst['metric']} vs {_COST_LABEL.get(worst['cost'])} on "
@@ -169,7 +174,10 @@ def _cmd_audit(args):
                       prune_px=args.prune_px, with_erl=not args.no_erl,
                       unit=str(path))
     attempted = [op for op in severities if severities.get(op)]
-    result = audit(rows, n_boot=args.n_boot, attempted=attempted)
+    from .audit import COSTS, MIN_UNITS_FOR_BLINDNESS
+    kw = dict(costs=tuple(args.cost) if args.cost else COSTS,
+              min_units=args.min_units if args.min_units is not None else MIN_UNITS_FOR_BLINDNESS)
+    result = audit(rows, n_boot=args.n_boot, attempted=attempted, **kw)
     if scales:
         radii = [s["median_radius"] for s in scales]
         ratios = [s["prune_in_radii"] for s in scales]
@@ -247,6 +255,14 @@ def build_parser():
     a.add_argument("masks", nargs="+", help="reference binary masks (3+ for CIs)")
     a.add_argument("--json", metavar="PATH", help="write the full result as JSON")
     a.add_argument("--csv", metavar="PATH", help="write the findings table as CSV")
+    a.add_argument("--cost", action="append", metavar="NAME",
+                   choices=["traceable_frac", "conductance_twosided", "conductance_frac",
+                            "traceable_single_frac"],
+                   help="cost to correlate against; repeatable "
+                        "(default: traceable_frac and conductance_twosided)")
+    a.add_argument("--min-units", type=int, default=None, metavar="N",
+                   help="below this many reference masks, a wide interval is reported as "
+                        "inconclusive rather than blind (default 10)")
     a.add_argument("--severities", metavar="LIST",
                    help="comma-separated severities for break/bridge/truncate "
                         "(default 0.02,0.05,0.1,0.2,0.5)")

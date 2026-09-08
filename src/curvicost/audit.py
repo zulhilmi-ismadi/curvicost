@@ -35,6 +35,12 @@ DEFAULT_SEVERITIES = {
 }
 COSTS = ("traceable_frac", "conductance_twosided")
 
+#: Below this many clustering units a percentile interval over resampled units is
+#: not informative -- with four masks a bootstrap has at most 35 distinct resamples,
+#: so "the interval includes zero" says more about the sample than about the metric.
+#: Findings below the floor are reported as `inconclusive` rather than `blind`.
+MIN_UNITS_FOR_BLINDNESS = 10
+
 #: False where a higher value means a WORSE segmentation, so its correlation
 #: must be negated before being read as "tracks the cost".
 HIGHER_IS_BETTER = {
@@ -145,7 +151,8 @@ def _bootstrap(x, y, units, n_boot, seed=0):
     return obs, float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
 
 
-def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
+def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None,
+          min_units=MIN_UNITS_FOR_BLINDNESS):
     """Correlate every metric against every cost, per operator.
 
     `attempted` names the operators that were actually swept. It cannot be
@@ -156,6 +163,10 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
     Returns {"n_cases", "n_units", "has_ci", "findings": [...]}. Each finding
     carries the SIGN-ALIGNED rho, so "more positive" always means "this metric
     tracks this cost", whichever direction the raw metric runs.
+
+    `min_units` is the floor below which a wide interval is reported as
+    `inconclusive` instead of `blind`: absence of evidence is not evidence of
+    blindness, and on a handful of masks every interval is wide.
     """
     attempted = tuple(OPERATORS if attempted is None else attempted)
     notes = {}                       # operator -> list of reasons; joined on return
@@ -229,11 +240,19 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None):
                     note(operator, f"{metric} was constant under this operator, so its "
                                    "correlation is undefined — the perturbation did not "
                                    "move that metric at all.")
-                blind = (not undefined) and np.isfinite(lo) and lo < 0 < hi
+                spans_zero = (not undefined) and np.isfinite(lo) and lo < 0 < hi
+                # Too few units to tell "no relation" from "not enough data".
+                inconclusive = spans_zero and len(units) < min_units
+                blind = spans_zero and not inconclusive
                 findings.append(dict(
                     cost=cost, operator=operator, metric=metric, n=len(sub),
                     aligned_rho=r, ci_lo=lo, ci_hi=hi, blind=bool(blind),
-                    anti=bool(np.isfinite(r) and r < -0.2 and not blind),
+                    inconclusive=bool(inconclusive),
+                    anti=bool(np.isfinite(r) and r < -0.2 and not spans_zero),
                     undefined=bool(undefined), cost_constant=bool(cost_constant)))
-    return dict(n_cases=len(rows), n_units=len(units),
-                has_ci=len(units) >= 3, findings=findings, notes=joined())
+    if 0 < len(units) < min_units:
+        note("__sample__", f"{len(units)} clustering unit(s): below {min_units}, a percentile interval over "
+                           "resampled units cannot separate 'no relation' from 'not enough data', so cells whose "
+                           "interval spans zero are reported as inconclusive rather than blind.")
+    return dict(n_cases=len(rows), n_units=len(units), has_ci=len(units) >= 3,
+                min_units=min_units, findings=findings, notes=joined())

@@ -180,3 +180,47 @@ def test_cli_renders_undefined_cells(tmp_path, twotrees, capsys):
     main(["audit", str(p), "--severities", "0.1,0.3,0.5", "--n-boot", "20"])
     out = capsys.readouterr().out
     assert "undef" in out
+
+
+def test_wide_interval_on_few_units_is_inconclusive_not_blind(tree2d, twotrees):
+    """Absence of evidence is not evidence of blindness. Below the unit floor a
+    cell whose interval spans zero must be reported as inconclusive."""
+    rows = []
+    for i, m in enumerate((tree2d, twotrees, tree2d[::-1], twotrees[::-1])):
+        rows += sweep(m, severities={"break": (0.1, 0.3, 0.5)}, unit=f"u{i}")
+    res = audit(rows, n_boot=200)
+    assert res["n_units"] == 4 and res["min_units"] == 10
+    spans = [f for f in res["findings"]
+             if not f["undefined"] and f["ci_lo"] == f["ci_lo"] and f["ci_lo"] < 0 < f["ci_hi"]]
+    assert all(f["inconclusive"] and not f["blind"] for f in spans), \
+        "a wide interval on 4 units must not be labelled blind"
+    if spans:
+        assert "__sample__" in res["notes"]
+
+
+def test_blind_is_still_reachable_with_enough_units(tree2d, twotrees):
+    """The floor must not make blindness unreportable: above it, the label works."""
+    rows = []
+    for i in range(12):
+        m = (tree2d, twotrees)[i % 2]
+        m = m[::-1] if i % 4 >= 2 else m
+        rows += sweep(m, severities={"break": (0.1, 0.3, 0.5)}, unit=f"u{i}")
+    res = audit(rows, n_boot=200, min_units=10)
+    assert res["n_units"] >= 10
+    assert all(not f["inconclusive"] for f in res["findings"])
+
+
+def test_cost_selection(twotrees):
+    """`costs` narrows what is correlated, so a user can audit one cost."""
+    rows = sweep(twotrees, severities={"break": (0.1, 0.3, 0.5)}, unit="t")
+    res = audit(rows, n_boot=50, costs=("traceable_frac",))
+    assert {f["cost"] for f in res["findings"]} == {"traceable_frac"}
+
+
+def test_cli_marks_inconclusive(tmp_path, tree2d, twotrees, capsys):
+    from curvicost.io import save_mask
+    paths = [str(save_mask(m, tmp_path / f"m{i}.npy"))
+             for i, m in enumerate((tree2d, twotrees, tree2d[::-1], twotrees[::-1]))]
+    main(["audit", *paths, "--severities", "0.1,0.3,0.5", "--n-boot", "200"])
+    out = capsys.readouterr().out
+    assert "INCONCLUSIVE" in out or "?" in out
