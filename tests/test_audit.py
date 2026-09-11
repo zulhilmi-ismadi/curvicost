@@ -182,45 +182,147 @@ def test_cli_renders_undefined_cells(tmp_path, twotrees, capsys):
     assert "undef" in out
 
 
-def test_wide_interval_on_few_units_is_inconclusive_not_blind(tree2d, twotrees):
-    """Absence of evidence is not evidence of blindness. Below the unit floor a
-    cell whose interval spans zero must be reported as inconclusive."""
+def test_few_units_is_inconclusive_whatever_the_interval(tree2d, twotrees):
+    """The paper's floor: a cell in which the operator acted in fewer than 10
+    units is inconclusive REGARDLESS of its interval -- a narrow interval on
+    four masks is not a validated correlation either. Never blind, never anti."""
     rows = []
     for i, m in enumerate((tree2d, twotrees, tree2d[::-1], twotrees[::-1])):
         rows += sweep(m, severities={"break": (0.1, 0.3, 0.5)}, unit=f"u{i}")
     res = audit(rows, n_boot=200)
-    assert res["n_units"] == 4 and res["min_units"] == 10
-    spans = [f for f in res["findings"]
-             if not f["undefined"] and f["ci_lo"] == f["ci_lo"] and f["ci_lo"] < 0 < f["ci_hi"]]
-    assert all(f["inconclusive"] and not f["blind"] for f in spans), \
-        "a wide interval on 4 units must not be labelled blind"
-    if spans:
-        assert "__sample__" in res["notes"]
+    assert res["n_units"] == 4 and res["min_units"] == 10 and res["min_cases"] == 12
+    defined = [f for f in res["findings"] if not f["undefined"]]
+    assert defined
+    for f in defined:
+        assert f["label"] == "inconclusive" and f["reason"].startswith("<10 units")
+        assert f["inconclusive"] and not f["blind"] and not f["anti"]
+        assert f["n_units"] == 4 and f["n"] == len([r for r in rows if r["operator"] == "break"])
+    assert "break" in res["notes"] and "INCONCLUSIVE" in res["notes"]["break"]
 
 
-def test_blind_is_still_reachable_with_enough_units(tree2d, twotrees):
-    """The floor must not make blindness unreportable: above it, the label works."""
+# ---- the paper's four labels, and the per-cell floors -----------------------------
+
+from curvicost.audit import label_cell, MIN_UNITS_FOR_BLINDNESS, MIN_CASES
+
+
+def test_floors_are_the_papers():
+    assert MIN_UNITS_FOR_BLINDNESS == 10 and MIN_CASES == 12
+
+
+@pytest.mark.parametrize("rho,lo,hi,n_cases,n_units,expect,reason", [
+    (np.nan, np.nan, np.nan, 100, 20, "undefined", ""),          # constant cost or metric
+    (0.9, 0.8, 0.95, 100, 9, "inconclusive", "<10 units"),      # narrow interval, too few units
+    (0.9, 0.8, 0.95, 11, 20, "inconclusive", "<12 cases"),      # too few cases
+    (0.9, 0.8, 0.95, 11, 9, "inconclusive", "<10 units, <12 cases"),
+    (-0.9, -0.95, -0.8, 100, 9, "inconclusive", "<10 units"),   # negative but below floor: NOT anti
+    (0.1, -0.2, 0.4, 100, 20, "blind", ""),                     # interval includes zero
+    (-0.1, -0.4, 0.2, 100, 20, "blind", ""),                    # negative point estimate, includes zero
+    (-0.5, -0.7, -0.3, 100, 20, "anti-correlated", ""),        # negative, excludes zero
+    (-0.05, -0.09, -0.01, 100, 20, "anti-correlated", ""),      # no -0.2 threshold any more
+    (0.5, 0.3, 0.7, 100, 20, "tracks", ""),
+    (0.5, 0.3, 0.7, 12, 10, "tracks", ""),                      # exactly at both floors
+])
+def test_label_definitions(rho, lo, hi, n_cases, n_units, expect, reason):
+    assert label_cell(rho, lo, hi, n_cases, n_units) == (expect, reason)
+
+
+def test_label_precedence_undefined_beats_floor():
+    assert label_cell(np.nan, np.nan, np.nan, 3, 1)[0] == "undefined"
+
+
+def test_unit_floor_is_counted_per_operator_cell(tree2d, twotrees):
+    """An operator that acts on few of the masks has fewer acting units than
+    the audit has masks; the floor must be counted per cell, not once."""
+    from curvicost.audit import METRIC_ORDER
+    # Twelve distinct "masks", but `bridge` only ever acts on the twotrees copies.
     rows = []
-    for i in range(12):
-        m = (tree2d, twotrees)[i % 2]
-        m = m[::-1] if i % 4 >= 2 else m
-        rows += sweep(m, severities={"break": (0.1, 0.3, 0.5)}, unit=f"u{i}")
-    res = audit(rows, n_boot=200, min_units=10)
-    assert res["n_units"] >= 10
-    assert all(not f["inconclusive"] for f in res["findings"])
+    masks = [tree2d, twotrees, tree2d[::-1], twotrees[::-1], tree2d.T, twotrees.T,
+             tree2d[:, ::-1], twotrees[:, ::-1], tree2d[::-1, ::-1], twotrees[::-1, ::-1],
+             tree2d.T[::-1], twotrees.T[::-1]]
+    for i, m in enumerate(masks):
+        rows += sweep(m, severities={"break": (0.1, 0.3, 0.5), "bridge": (0.1, 0.3, 0.5)},
+                      unit=f"u{i}")
+    res = audit(rows, n_boot=50, attempted=["break", "bridge"])
+    assert res["n_units"] == 12
+    brk = [f for f in res["findings"] if f["operator"] == "break"]
+    brg = [f for f in res["findings"] if f["operator"] == "bridge"]
+    assert brk and all(f["n_units"] == 12 for f in brk)
+    assert all(f["label"] != "inconclusive" for f in brk if not f["undefined"]), \
+        "12 acting units and 36 cases clear both floors"
+    assert brg, "bridge produced no cells on the twotrees copies"
+    assert all(f["n_units"] == 6 for f in brg), "bridge acts on the six twotrees copies only"
+    assert all(f["label"] in ("inconclusive", "undefined") for f in brg)
+    assert all(f["reason"].startswith("<10 units") for f in brg if f["label"] == "inconclusive")
 
 
-def test_cost_selection(twotrees):
-    """`costs` narrows what is correlated, so a user can audit one cost."""
-    rows = sweep(twotrees, severities={"break": (0.1, 0.3, 0.5)}, unit="t")
-    res = audit(rows, n_boot=50, costs=("traceable_frac",))
-    assert {f["cost"] for f in res["findings"]} == {"traceable_frac"}
+def test_case_floor_is_counted_per_operator_cell(tree2d, twotrees):
+    """Ten units but one severity each: 10 acting cases < 12 -> inconclusive (<12 cases)."""
+    rows = []
+    masks = [tree2d, twotrees, tree2d[::-1], twotrees[::-1], tree2d.T, twotrees.T,
+             tree2d[:, ::-1], twotrees[:, ::-1], tree2d[::-1, ::-1], twotrees[::-1, ::-1]]
+    for i, m in enumerate(masks):
+        rows += sweep(m, severities={"break": (0.3,)}, unit=f"u{i}")
+    res = audit(rows, n_boot=50, attempted=["break"])
+    cells = [f for f in res["findings"] if not f["undefined"]]
+    assert cells
+    assert all(f["n_units"] == 10 and f["n"] == 10 for f in cells)
+    assert all(f["label"] == "inconclusive" and f["reason"] == "<12 cases" for f in cells)
 
 
-def test_cli_marks_inconclusive(tmp_path, tree2d, twotrees, capsys):
+def test_findings_carry_label_interval_and_counts(rows):
+    res = audit(rows, n_boot=50)
+    for f in res["findings"]:
+        assert f["label"] in ("undefined", "inconclusive", "blind", "anti-correlated", "tracks")
+        assert {"n", "n_units", "ci_lo", "ci_hi", "reason"} <= set(f)
+        assert f["undefined"] == (f["label"] == "undefined")
+        assert f["inconclusive"] == (f["label"] == "inconclusive")
+        assert f["blind"] == (f["label"] == "blind")
+        assert f["anti"] == (f["label"] == "anti-correlated")
+
+
+def test_cli_prints_every_cell_with_interval_and_counts(tmp_path, twotrees, capsys):
     from curvicost.io import save_mask
-    paths = [str(save_mask(m, tmp_path / f"m{i}.npy"))
-             for i, m in enumerate((tree2d, twotrees, tree2d[::-1], twotrees[::-1]))]
-    main(["audit", *paths, "--severities", "0.1,0.3,0.5", "--n-boot", "200"])
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    main(["audit", str(p), "--severities", "0.1,0.3,0.5", "--n-boot", "20"])
     out = capsys.readouterr().out
-    assert "INCONCLUSIVE" in out or "?" in out
+    assert "every cell" in out and "cases" in out and "units" in out
+    assert "inconclusive (<10 units" in out
+    assert "anti-correlated" in out and "undefined" in out and "blind" in out
+
+
+def test_cli_csv_has_label_and_counts(tmp_path, twotrees):
+    from curvicost.io import save_mask
+    import csv as _csv
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    c = tmp_path / "a.csv"
+    main(["audit", str(p), "--csv", str(c), "--severities", "0.1,0.3,0.5",
+          "--n-boot", "20", "--quiet"])
+    hdr = c.read_text().splitlines()[0].split(",")
+    for col in ("label", "reason", "n", "n_units", "ci_lo", "ci_hi", "blind", "anti",
+                "inconclusive", "undefined", "cost_constant"):
+        assert col in hdr, col
+    rows_ = list(_csv.DictReader(c.open()))
+    assert all(r["label"] in ("undefined", "inconclusive") for r in rows_), \
+        "one mask can never produce a verdict"
+
+
+def test_cli_ladder_options(tmp_path, twotrees):
+    """--radius-scales / --boundary-fracs / --study-ladder must reach sweep()."""
+    from curvicost.io import save_mask
+    from curvicost.audit import STUDY_SEVERITIES
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    j = tmp_path / "a.json"
+    main(["audit", str(p), "--json", str(j), "--quiet", "--n-boot", "5",
+          "--severities", "0.1,0.5", "--radius-scales", "0.85,1.15",
+          "--boundary-fracs", "0.01,0.02"])
+    lad = json.loads(j.read_text())["ladder"]
+    assert lad["severities"]["radius"] == [0.85, 1.15]
+    assert lad["severities"]["boundary"] == [0.01, 0.02]
+    assert lad["severities"]["break"] == [0.1, 0.5] and lad["seeds"] == [0] and lad["n_boot"] == 5
+    # --study-ladder sets the study's values; explicit options still override.
+    parser_args = __import__("curvicost.cli", fromlist=["build_parser"]).build_parser().parse_args(
+        ["audit", str(p), "--study-ladder"])
+    assert parser_args.study_ladder and parser_args.seeds is None
+    assert STUDY_SEVERITIES["break"] == (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50)
+    assert STUDY_SEVERITIES["radius"] == (0.50, 0.70, 0.85, 1.15, 1.30)
+    assert STUDY_SEVERITIES["boundary"] == (0.002, 0.005, 0.01, 0.02, 0.05, 0.10, 0.20)

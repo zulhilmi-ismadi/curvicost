@@ -78,12 +78,19 @@ _COST_LABEL = {"traceable_frac": "traceable length (reachable reference skeleton
                "conductance_frac": "conductance (Kirchhoff, raw fraction retained)"}
 
 
+_LABEL_MARK = {"blind": "*", "anti-correlated": "!", "inconclusive": "?", "tracks": " "}
+
+
 def _audit_report(result, stream):
-    """The blindness report: metrics down, operators across, one block per cost."""
+    """The blindness report: a grid per cost (metrics down, operators across) and
+    then every cell in full -- rho, its interval, acting cases and acting units --
+    with the paper's label."""
     from .audit import OPERATORS, METRIC_ORDER
 
-    metrics = [m for m in METRIC_ORDER
-               if any(f["metric"] == m for f in result["findings"])]
+    findings = result["findings"]
+    metrics = [m for m in METRIC_ORDER if any(f["metric"] == m for f in findings)]
+    min_units = result.get("min_units", 10)
+    min_cases = result.get("min_cases", 12)
     print(f"\n{result['n_cases']} cases from {result['n_units']} reference mask(s)",
           file=stream)
     if not result["has_ci"]:
@@ -91,25 +98,54 @@ def _audit_report(result, stream):
               "confidence\n   intervals, and blindness cannot be judged. Treat these as "
               "indicative only.", file=stream)
 
-    for cost in dict.fromkeys(f["cost"] for f in result["findings"]):
+    def cell(cost, op, m):
+        return next((f for f in findings if f["cost"] == cost and f["operator"] == op
+                     and f["metric"] == m), None)
+
+    costs = list(dict.fromkeys(f["cost"] for f in findings))
+    for cost in costs:
         print(f"\n  vs {_COST_LABEL.get(cost, cost)}", file=stream)
         print("  " + "metric".ljust(14) + "".join(o.rjust(11) for o in OPERATORS),
               file=stream)
         for m in metrics:
             cells = ""
             for op in OPERATORS:
-                f = next((f for f in result["findings"]
-                          if f["cost"] == cost and f["operator"] == op
-                          and f["metric"] == m), None)
+                f = cell(cost, op, m)
                 if f is None:
                     cells += "         --"
-                elif f.get("undefined") or f["aligned_rho"] != f["aligned_rho"]:
+                elif f["label"] == "undefined":
                     cells += "      undef"
+                elif f["label"] == "inconclusive":
+                    # Printed for the record, in parentheses: NOT a validated
+                    # correlation, never a verdict.
+                    cells += f"{'(' + format(f['aligned_rho'], '+.2f') + ')':>10}?"
                 else:
-                    mark = ("*" if f["blind"] else "?" if f.get("inconclusive")
-                            else "!" if f["anti"] else " ")
-                    cells += f"{f['aligned_rho']:>+10.2f}{mark}"
+                    cells += f"{f['aligned_rho']:>+10.2f}{_LABEL_MARK[f['label']]}"
             print("  " + m.ljust(14) + cells, file=stream)
+
+    # Every cell in full. The grid above is the summary; this is the evidence.
+    print("\n  every cell: sign-aligned Spearman ρ, 95% cluster-bootstrap interval, acting "
+          "cases / acting units, label", file=stream)
+    for cost in costs:
+        print(f"\n  vs {_COST_LABEL.get(cost, cost)}", file=stream)
+        print("  " + "operator".ljust(10) + "metric".ljust(14) + "ρ".rjust(7)
+              + "  [   lo,    hi]" + "  cases" + "  units" + "  label", file=stream)
+        for op in OPERATORS:
+            for m in metrics:
+                f = cell(cost, op, m)
+                if f is None:
+                    continue
+                rho = f["aligned_rho"]
+                if f["label"] == "undefined":
+                    num, ci = "  undef", "  [    --,    --]"
+                else:
+                    num = f"{rho:>+7.3f}"
+                    lo, hi = f["ci_lo"], f["ci_hi"]
+                    ci = ("  [" + (f"{lo:+.2f}" if lo == lo else "   --").rjust(6) + ", "
+                          + (f"{hi:+.2f}" if hi == hi else "   --").rjust(6) + "]")
+                lab = f["label"] + (f" ({f['reason']})" if f.get("reason") else "")
+                print("  " + op.ljust(10) + m.ljust(14) + num + ci
+                      + f"{f['n']:>7}{f['n_units']:>7}  {lab}", file=stream)
 
     sc = result.get("scale")
     if sc:
@@ -125,46 +161,62 @@ def _audit_report(result, stream):
                   "unless you match this ratio.", file=stream)
     for op, why in sorted(result.get("notes", {}).items()):
         print(f"\n⚠  {op}: {why}", file=stream)
-    if not result["findings"]:
+    if not findings:
         print("\nNo correlations could be computed. See above.", file=stream)
         return
-    blind = [f for f in result["findings"] if f["blind"]]
-    anti = [f for f in result["findings"] if f["anti"]]
-    undef = [f for f in result["findings"] if f.get("undefined")]
-    print(f"\n  * CI includes zero — blind to that error type   ({len(blind)} of "
-          f"{len(result['findings'])} combinations)", file=stream)
-    print(f"  ! anti-correlates — the metric moves the WRONG WAY   ({len(anti)})",
-          file=stream)
-    if undef:
-        print(f"  undef  the cost (or the metric) did not move under that operator, so ρ "
-              f"is undefined   ({len(undef)})", file=stream)
-    incon = [f for f in result["findings"] if f.get("inconclusive")]
-    if incon:
-        print(f"  ? interval spans zero but there are only {result['n_units']} clustering unit(s) — "
-              f"INCONCLUSIVE, not blind   ({len(incon)})", file=stream)
+    count = lambda lab: sum(1 for f in findings if f["label"] == lab)
+    n = len(findings)
+    print(f"\n  labels ({n} cells; definitions as in the paper's Methods):", file=stream)
+    print(f"  undef  undefined — the cost or the metric is constant across the cell, so ρ "
+          f"does not exist   ({count('undefined')})", file=stream)
+    print(f"  (ρ)?   inconclusive — the operator acted in fewer than {min_units} units or "
+          f"fewer than {min_cases} cases; ρ is shown\n         for the record but is NOT a "
+          f"validated correlation and is never read as blind or anti-correlated   "
+          f"({count('inconclusive')})", file=stream)
+    print(f"  *      blind — the interval includes zero: the metric cannot see that error "
+          f"type on this data   ({count('blind')})", file=stream)
+    print(f"  !      anti-correlated — ρ is negative and the interval excludes zero: the "
+          f"metric moves the WRONG WAY   ({count('anti-correlated')})", file=stream)
+    print(f"         tracks — ρ is positive and the interval excludes zero   "
+          f"({count('tracks')})", file=stream)
+    anti = [f for f in findings if f["label"] == "anti-correlated"]
     if anti:
         worst = min(anti, key=lambda f: f["aligned_rho"])
-        print(f"    worst: {worst['metric']} vs {_COST_LABEL.get(worst['cost'])} on "
+        print(f"    worst: {worst['metric']} vs {_COST_LABEL.get(worst['cost'], worst['cost'])} on "
               f"{worst['operator']} (ρ {worst['aligned_rho']:+.2f}). When the metric "
               f"moves the wrong way on an\n    error type, check first whether the "
               "cost is the right one for that error type.", file=stream)
+
+
+def _parse_floats(text):
+    return tuple(float(v) for v in text.split(",") if v.strip())
 
 
 def _cmd_audit(args):
     import json as _json
 
     import numpy as np
-    from .audit import sweep, audit, DEFAULT_SEVERITIES
+    from .audit import (sweep, audit, scale_report, DEFAULT_SEVERITIES, STUDY_SEVERITIES,
+                        STUDY_SEEDS, STUDY_N_BOOT, COSTS, MIN_UNITS_FOR_BLINDNESS, MIN_CASES)
 
-    severities = dict(DEFAULT_SEVERITIES)
+    if args.study_ladder:
+        severities = dict(STUDY_SEVERITIES)
+        n_seeds = len(STUDY_SEEDS) if args.seeds is None else args.seeds
+        n_boot = STUDY_N_BOOT if args.n_boot is None else args.n_boot
+    else:
+        severities = dict(DEFAULT_SEVERITIES)
+        n_seeds = 1 if args.seeds is None else args.seeds
+        n_boot = 1000 if args.n_boot is None else args.n_boot
     if args.severities:
-        vals = tuple(float(v) for v in args.severities.split(","))
+        vals = _parse_floats(args.severities)
         for op in ("break", "bridge", "truncate"):
             severities[op] = vals
+    if args.radius_scales:
+        severities["radius"] = _parse_floats(args.radius_scales)
+    if args.boundary_fracs:
+        severities["boundary"] = _parse_floats(args.boundary_fracs)
 
-    from .audit import scale_report
-
-    rows, seeds, scales = [], tuple(range(args.seeds)), []
+    rows, seeds, scales = [], tuple(range(n_seeds)), []
     for path in args.masks:
         mask, _ = load_mask(path)
         if not args.quiet:
@@ -174,10 +226,13 @@ def _cmd_audit(args):
                       prune_px=args.prune_px, with_erl=not args.no_erl,
                       unit=str(path))
     attempted = [op for op in severities if severities.get(op)]
-    from .audit import COSTS, MIN_UNITS_FOR_BLINDNESS
     kw = dict(costs=tuple(args.cost) if args.cost else COSTS,
-              min_units=args.min_units if args.min_units is not None else MIN_UNITS_FOR_BLINDNESS)
-    result = audit(rows, n_boot=args.n_boot, attempted=attempted, **kw)
+              min_units=args.min_units if args.min_units is not None else MIN_UNITS_FOR_BLINDNESS,
+              min_cases=args.min_cases if args.min_cases is not None else MIN_CASES)
+    result = audit(rows, n_boot=n_boot, attempted=attempted, **kw)
+    result["ladder"] = dict(severities={k: list(v) for k, v in severities.items()},
+                            seeds=list(seeds), n_boot=n_boot,
+                            prune_px=args.prune_px, version=__version__)
     if scales:
         radii = [s["median_radius"] for s in scales]
         ratios = [s["prune_in_radii"] for s in scales]
@@ -189,7 +244,7 @@ def _cmd_audit(args):
         with open(args.json, "w") as fh:
             _json.dump(dict(result, cases=rows if args.include_cases else None),
                        fh, indent=2, default=float)
-    if args.csv:
+    if args.csv and result["findings"]:
         with open(args.csv, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(result["findings"][0]))
             w.writeheader(); w.writerows(result["findings"])
@@ -322,8 +377,34 @@ def build_parser():
     pr.add_argument("--quiet", action="store_true")
     pr.set_defaults(func=_cmd_profile)
 
-    a = subs.add_parser("audit", help="which error types is your metric blind to?")
-    a.add_argument("masks", nargs="+", help="reference binary masks (3+ for CIs)")
+    a = subs.add_parser(
+        "audit", help="which error types is your metric blind to?",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Perturb each reference mask with every operator across a severity ladder, "
+            "score every case, and correlate each metric against each cost per operator.\n"
+            "\n"
+            "The DEFAULT LADDER IS SHORTENED relative to the accompanying study, because an\n"
+            "audit is a diagnostic run on your own machine:\n"
+            "  default  break/bridge/truncate at 2, 5, 10, 20, 50 % (5 rungs); radius x0.7,\n"
+            "           0.85, 1.15, 1.3 (4 factors); boundary 0.5, 2, 5, 10, 20 % (5 levels);\n"
+            "           1 seed; 1,000 bootstrap iterations.\n"
+            "  study    break/bridge/truncate at 1, 2, 5, 10, 20, 35, 50 % (7 rungs); radius\n"
+            "           x0.5, 0.7, 0.85, 1.15, 1.3; boundary 0.2, 0.5, 1, 2, 5, 10, 20 %;\n"
+            "           3 seeds; 2,000 bootstrap iterations.  Reproduce it with --study-ladder.\n"
+            "--severities widens break/bridge/truncate ONLY; use --radius-scales and\n"
+            "--boundary-fracs for the other two operators.\n"
+            "\n"
+            "Each (cost, operator, metric) cell gets one of the paper's four labels:\n"
+            "  undefined       the cost or the metric is constant across the cell\n"
+            "  inconclusive    the operator acted in < 10 units or < 12 cases (rho is shown,\n"
+            "                  but is not a validated correlation; never read as blind/anti)\n"
+            "  blind           the 95% cluster-bootstrap interval includes zero\n"
+            "  anti-correlated sign-aligned rho < 0 and the interval excludes zero\n"
+            "Units are reference masks, so a cell can only leave 'inconclusive' with 10+ masks."
+        ))
+    a.add_argument("masks", nargs="+",
+                   help="reference binary masks (3+ for intervals, 10+ for any verdict)")
     a.add_argument("--json", metavar="PATH", help="write the full result as JSON")
     a.add_argument("--csv", metavar="PATH", help="write the findings table as CSV")
     a.add_argument("--cost", action="append", metavar="NAME",
@@ -332,15 +413,28 @@ def build_parser():
                    help="cost to correlate against; repeatable "
                         "(default: traceable_frac and conductance_twosided)")
     a.add_argument("--min-units", type=int, default=None, metavar="N",
-                   help="below this many reference masks, a wide interval is reported as "
-                        "inconclusive rather than blind (default 10)")
+                   help="a cell in which the operator acted in fewer than N reference masks "
+                        "is inconclusive (default 10, the paper's floor)")
+    a.add_argument("--min-cases", type=int, default=None, metavar="N",
+                   help="a cell with fewer than N acting cases is inconclusive "
+                        "(default 12, the paper's minimum group size)")
     a.add_argument("--severities", metavar="LIST",
-                   help="comma-separated severities for break/bridge/truncate "
-                        "(default 0.02,0.05,0.1,0.2,0.5)")
-    a.add_argument("--seeds", type=int, default=1, metavar="N",
-                   help="random seeds per operator/severity (default 1)")
-    a.add_argument("--n-boot", type=int, default=1000, metavar="N",
-                   help="cluster-bootstrap iterations (default 1000)")
+                   help="comma-separated severities for break/bridge/truncate ONLY "
+                        "(default 0.02,0.05,0.1,0.2,0.5; study 0.01,0.02,0.05,0.1,0.2,0.35,0.5)")
+    a.add_argument("--radius-scales", metavar="LIST",
+                   help="comma-separated scale factors for radius "
+                        "(default 0.7,0.85,1.15,1.3; study 0.5,0.7,0.85,1.15,1.3)")
+    a.add_argument("--boundary-fracs", metavar="LIST",
+                   help="comma-separated fractions of foreground voxels for boundary "
+                        "(default 0.005,0.02,0.05,0.1,0.2; study 0.002,0.005,0.01,0.02,0.05,0.1,0.2)")
+    a.add_argument("--seeds", type=int, default=None, metavar="N",
+                   help="random seeds per operator/severity (default 1; study 3)")
+    a.add_argument("--n-boot", "--bootstrap", dest="n_boot", type=int, default=None, metavar="N",
+                   help="cluster-bootstrap iterations (default 1000; study 2000)")
+    a.add_argument("--study-ladder", action="store_true",
+                   help="use the study's full ladder, 3 seeds and 2,000 bootstrap iterations "
+                        "(explicit --severities/--radius-scales/--boundary-fracs/--seeds/"
+                        "--n-boot still override)")
     a.add_argument("--no-erl", action="store_true")
     a.add_argument("--prune-px", type=int, default=5, metavar="N")
     a.add_argument("--include-cases", action="store_true",

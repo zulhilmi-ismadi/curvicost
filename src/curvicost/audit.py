@@ -8,9 +8,27 @@ user's own reference masks: perturb with each operator across a severity
 ladder, score every case, and correlate each metric against each cost,
 separately per operator.
 
-What comes back is a blindness report. A metric with a correlation whose CI
-includes zero for some operator cannot see that error type on this data --
-report it and you are reporting nothing about that failure mode.
+What comes back is a blindness report. Every (cost, operator, metric) cell
+carries one of four labels, defined exactly as in the paper's Methods:
+
+* ``undefined``       -- the cost or the metric is constant across the cell, so
+                         no correlation exists. A statement about the cost (or
+                         the metric), not about blindness.
+* ``inconclusive``    -- the operator acted in fewer than 10 clustering units
+                         (``MIN_UNITS_FOR_BLINDNESS``) or in fewer than 12 cases
+                         (``MIN_CASES``). The point estimate is reported but is
+                         not a validated correlation and is never read as blind
+                         or anti-correlated.
+* ``blind``           -- the 95% cluster-bootstrap interval includes zero: the
+                         metric cannot see that error type on this data.
+* ``anti-correlated`` -- the sign-aligned point estimate is negative AND the
+                         interval excludes zero: the metric moves the wrong way.
+
+A cell that is none of these ``tracks`` the cost.
+
+The default severity ladder is a SHORTENED version of the study's, because an
+audit is a diagnostic run on the user's own machine (see ``DEFAULT_SEVERITIES``
+and ``STUDY_SEVERITIES``).
 """
 from __future__ import annotations
 
@@ -22,10 +40,16 @@ from scipy.stats import ConstantInputWarning, spearmanr
 from .perturb import perturb, OPERATORS
 from .score import score, prepare_reference
 
-__all__ = ["audit", "sweep", "scale_report", "DEFAULT_SEVERITIES", "COSTS"]
+__all__ = ["audit", "sweep", "scale_report", "label_cell", "DEFAULT_SEVERITIES",
+           "STUDY_SEVERITIES", "STUDY_SEEDS", "STUDY_N_BOOT", "COSTS", "LABELS",
+           "MIN_UNITS_FOR_BLINDNESS", "MIN_CASES"]
 
 #: Kept short by default: an audit is a diagnostic the user runs on their own
-#: machine, not the paper's 9,612-case sweep. Widen with --severities.
+#: machine, not the study's sweep (10,680 cases scored, 9,845 entering the
+#: correlations). Five counting rungs for break/bridge/truncate, four radius
+#: factors, five boundary levels, one seed. ``--severities`` widens the three
+#: counting operators only; ``--radius-scales``, ``--boundary-fracs``,
+#: ``--seeds`` and ``--bootstrap`` (or ``--study-ladder``) reach the study's.
 DEFAULT_SEVERITIES = {
     "break":    (0.02, 0.05, 0.10, 0.20, 0.50),
     "bridge":   (0.02, 0.05, 0.10, 0.20, 0.50),
@@ -33,13 +57,37 @@ DEFAULT_SEVERITIES = {
     "radius":   (0.70, 0.85, 1.15, 1.30),
     "boundary": (0.005, 0.02, 0.05, 0.10, 0.20),
 }
+#: The study's own ladder (Methods, "Operators"): seven counting rungs at
+#: 1, 2, 5, 10, 20, 35 and 50 % of each operator's eligible population, five
+#: radius scale factors, seven boundary levels, three seeds per stochastic
+#: rung, and a 2,000-iteration cluster bootstrap.
+STUDY_SEVERITIES = {
+    "break":    (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50),
+    "bridge":   (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50),
+    "truncate": (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50),
+    "radius":   (0.50, 0.70, 0.85, 1.15, 1.30),
+    "boundary": (0.002, 0.005, 0.01, 0.02, 0.05, 0.10, 0.20),
+}
+STUDY_SEEDS = (0, 1, 2)
+STUDY_N_BOOT = 2000
+DEFAULT_N_BOOT = 1000
 COSTS = ("traceable_frac", "conductance_twosided")
 
-#: Below this many clustering units a percentile interval over resampled units is
-#: not informative -- with four masks a bootstrap has at most 35 distinct resamples,
-#: so "the interval includes zero" says more about the sample than about the metric.
-#: Findings below the floor are reported as `inconclusive` rather than `blind`.
+#: A cell is a correlation only if the operator ACTED (changed the mask) in at
+#: least this many clustering units. Counted per cell, not once over the whole
+#: audit: an operator that declines on most masks has fewer acting units than
+#: the audit has masks. Below the floor a percentile interval over resampled
+#: units cannot separate "no relation" from "not enough data" -- with four
+#: masks a bootstrap has at most 35 distinct resamples -- so the cell is
+#: reported as ``inconclusive`` whatever its interval says, and never as
+#: ``blind`` or ``anti-correlated``. This is the floor the paper applies to its
+#: own grid.
 MIN_UNITS_FOR_BLINDNESS = 10
+#: ... and in at least this many acting cases (the paper's minimum group size).
+MIN_CASES = 12
+
+#: The four labels of the paper's Methods plus the one that means "no finding".
+LABELS = ("undefined", "inconclusive", "blind", "anti-correlated", "tracks")
 
 #: False where a higher value means a WORSE segmentation, so its correlation
 #: must be negated before being read as "tracks the cost".
@@ -151,8 +199,46 @@ def _bootstrap(x, y, units, n_boot, seed=0):
     return obs, float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
 
 
-def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None,
-          min_units=MIN_UNITS_FOR_BLINDNESS):
+def label_cell(aligned_rho, ci_lo, ci_hi, n_cases, n_units, *,
+               min_units=MIN_UNITS_FOR_BLINDNESS, min_cases=MIN_CASES):
+    """The paper's four labels for one (cost, operator, metric) cell.
+
+    Applied in this order, first match wins:
+
+    1. ``undefined``       rho is not finite (constant cost or constant metric).
+    2. ``inconclusive``    fewer than `min_units` acting units OR fewer than
+                           `min_cases` acting cases -- regardless of the interval.
+    3. ``blind``           the interval includes zero.
+    4. ``anti-correlated`` rho < 0 and the interval excludes zero.
+    5. ``tracks``          otherwise (rho > 0, interval excludes zero).
+
+    Returns (label, reason); `reason` is "" except for inconclusive cells, where
+    it names the floor that was missed ("<10 units", "<12 cases", or both).
+    """
+    if not np.isfinite(aligned_rho):
+        return "undefined", ""
+    short = []
+    if n_units < min_units:
+        short.append(f"<{min_units} units")
+    if n_cases < min_cases:
+        short.append(f"<{min_cases} cases")
+    if short:
+        return "inconclusive", ", ".join(short)
+    has_ci = np.isfinite(ci_lo) and np.isfinite(ci_hi)
+    if not has_ci:
+        # Cannot happen above the unit floor (the bootstrap needs 3 units), but
+        # a caller lowering `min_units` below 3 must not get a verdict from a
+        # missing interval.
+        return "inconclusive", "no interval"
+    if ci_lo < 0 < ci_hi:
+        return "blind", ""
+    if aligned_rho < 0:
+        return "anti-correlated", ""
+    return "tracks", ""
+
+
+def audit(rows, *, costs=COSTS, n_boot=DEFAULT_N_BOOT, seed=0, attempted=None,
+          min_units=MIN_UNITS_FOR_BLINDNESS, min_cases=MIN_CASES):
     """Correlate every metric against every cost, per operator.
 
     `attempted` names the operators that were actually swept. It cannot be
@@ -160,13 +246,17 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None,
     and one that was never requested both leave no trace there -- and the
     first is worth reporting while the second is not.
 
-    Returns {"n_cases", "n_units", "has_ci", "findings": [...]}. Each finding
-    carries the SIGN-ALIGNED rho, so "more positive" always means "this metric
-    tracks this cost", whichever direction the raw metric runs.
+    Returns {"n_cases", "n_units", "has_ci", "min_units", "min_cases",
+    "findings": [...], "notes": {...}}. Each finding is one cell and carries
+    the SIGN-ALIGNED rho (so "more positive" always means "this metric tracks
+    this cost", whichever direction the raw metric runs), its 95% cluster-
+    bootstrap interval, ``n`` acting cases, ``n_units`` acting units, and the
+    paper's ``label`` (see `label_cell`) with the boolean flags ``undefined``,
+    ``inconclusive``, ``blind`` and ``anti`` that spell the same thing.
 
-    `min_units` is the floor below which a wide interval is reported as
-    `inconclusive` instead of `blind`: absence of evidence is not evidence of
-    blindness, and on a handful of masks every interval is wide.
+    Every row in `rows` is a case in which the operator acted: `sweep` drops
+    cases where the operator returned the reference unchanged, so ``n`` and
+    ``n_units`` count acting cases and acting units per cell, as the paper does.
     """
     attempted = tuple(OPERATORS if attempted is None else attempted)
     notes = {}                       # operator -> list of reasons; joined on return
@@ -191,15 +281,19 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None,
                            "values to --severities or raise --seeds.")
     joined = lambda: {op: " ".join(why) for op, why in notes.items()}
     if not rows:
-        return dict(n_cases=0, n_units=0, has_ci=False, findings=[], notes=joined())
+        return dict(n_cases=0, n_units=0, has_ci=False, min_units=min_units,
+                    min_cases=min_cases, findings=[], notes=joined())
     units = sorted({r["unit"] for r in rows})
     metrics = [m for m in METRIC_ORDER if m in rows[0]]
     findings = []
+    short_cells = {}                 # operator -> (n_cases, n_units) below a floor
     for cost in costs:
         for operator in OPERATORS:
             sub = [r for r in rows if r["operator"] == operator]
             if len(sub) < 3:
                 continue
+            n_cases = len(sub)
+            n_units = len({r["unit"] for r in sub})
             cost_vals = np.asarray([s[cost] for s in sub], float)
             cost_vals = cost_vals[np.isfinite(cost_vals)]
             # A cost the operator does not move (reachable length under `bridge`:
@@ -235,24 +329,31 @@ def audit(rows, *, costs=COSTS, n_boot=1000, seed=0, attempted=None,
                 if not HIGHER_IS_BETTER.get(metric, True) and np.isfinite(r):
                     r, lo, hi = -r, (-hi if np.isfinite(hi) else np.nan), \
                                 (-lo if np.isfinite(lo) else np.nan)
-                undefined = not np.isfinite(r)
-                if undefined and not cost_constant:
+                label, reason = label_cell(r, lo, hi, n_cases, n_units,
+                                           min_units=min_units, min_cases=min_cases)
+                if label == "undefined" and not cost_constant:
                     note(operator, f"{metric} was constant under this operator, so its "
                                    "correlation is undefined — the perturbation did not "
                                    "move that metric at all.")
-                spans_zero = (not undefined) and np.isfinite(lo) and lo < 0 < hi
-                # Too few units to tell "no relation" from "not enough data".
-                inconclusive = spans_zero and len(units) < min_units
-                blind = spans_zero and not inconclusive
+                if label == "inconclusive":
+                    short_cells[operator] = (n_cases, n_units, reason)
                 findings.append(dict(
-                    cost=cost, operator=operator, metric=metric, n=len(sub),
-                    aligned_rho=r, ci_lo=lo, ci_hi=hi, blind=bool(blind),
-                    inconclusive=bool(inconclusive),
-                    anti=bool(np.isfinite(r) and r < -0.2 and not spans_zero),
-                    undefined=bool(undefined), cost_constant=bool(cost_constant)))
-    if 0 < len(units) < min_units:
-        note("__sample__", f"{len(units)} clustering unit(s): below {min_units}, a percentile interval over "
-                           "resampled units cannot separate 'no relation' from 'not enough data', so cells whose "
-                           "interval spans zero are reported as inconclusive rather than blind.")
+                    cost=cost, operator=operator, metric=metric,
+                    n=n_cases, n_units=n_units,
+                    aligned_rho=r, ci_lo=lo, ci_hi=hi,
+                    label=label, reason=reason,
+                    undefined=label == "undefined",
+                    inconclusive=label == "inconclusive",
+                    blind=label == "blind",
+                    anti=label == "anti-correlated",
+                    cost_constant=bool(cost_constant)))
+    for operator, (n_cases, n_units, reason) in sorted(short_cells.items()):
+        note(operator, f"acted in {n_units} unit(s) and {n_cases} case(s): below the floor "
+                       f"({reason}), so every defined cell is reported as INCONCLUSIVE. Its ρ "
+                       "is printed for the record but is not a validated correlation and is "
+                       "never read as blind or anti-correlated. A percentile interval over so "
+                       "few resampled units cannot separate 'no relation' from 'not enough "
+                       "data'; give the audit more reference masks.")
     return dict(n_cases=len(rows), n_units=len(units), has_ci=len(units) >= 3,
-                min_units=min_units, findings=findings, notes=joined())
+                min_units=min_units, min_cases=min_cases, findings=findings,
+                notes=joined())

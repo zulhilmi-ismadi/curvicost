@@ -25,22 +25,26 @@ pip install "curvicost[io]"    # + TIFF / NIfTI / PNG loading
 ## Use
 
 ```bash
-curvicost score pred.png --gt gt.png --json row.json
+curvicost perturb gt.png --operator break --severity 0.10 --prune-px 17 -o broken.png
+curvicost score broken.png --gt gt.png --prune-px 17 --json row.json
 ```
 
 ```
 metric                 value   |  cost                      value
 --------------------------------------------------------------------
-dice                  0.9907   |  traceable_frac             0.6864
-iou                   0.9816   |  traceable_single_frac      0.6751
-cldice                0.9916   |  conductance_frac           0.7569
-betti0_error               8   |  perfused_of_self           0.6613
-erl_frac              0.5066   |
-diadem_like           0.9973   |
+dice                 0.9897   |  traceable_frac           0.8484
+iou                  0.9795   |  traceable_single_frac    0.8429
+cldice               0.9903   |  conductance_twosided     0.1949
+betti0_error              9   |  conductance_frac         0.1949
+erl_frac             0.7287   |  perfused_of_self         0.8304
+diadem_like          0.9577   |
 ```
 
-(That row is a FIVES fundus mask with 10% of its skeleton branches cut: 1.8%
-of the pixels moved, Dice 0.99, a third of the reference no longer reachable.)
+(Output of curvicost 0.2.0 on FIVES test mask `100_D` with 10% of its skeleton
+branches cut, 17 breaks: 0.14% of the pixels moved, Dice 0.99, 15% of the
+reference skeleton no longer reachable and 80% of its hydraulic conductance
+gone. `--prune-px 17` is the scale for these 2048-pixel fundus masks; see
+"Resolution" below.)
 
 From Python:
 
@@ -75,41 +79,81 @@ curvicost audit gt1.png gt2.png gt3.png gt4.png --prune-px 17 --csv blindness.cs
 
   vs traceable length (reachable reference skeleton)
   metric              break     bridge   truncate     radius   boundary
-  dice               +0.83       undef     +0.96      +0.47      +0.78
-  iou                +0.83       undef     +0.96      +0.47      +0.78
-  cldice             +0.76       undef     +1.00      +0.37*     +1.00
-  betti0_error       +0.78       undef      undef      undef      undef
-  erl_frac           +0.86       undef     +1.00      +1.00      +1.00
-  diadem_like        +0.60       undef     +0.92      -0.71!     +0.91
+  dice             (+0.85)?      undef   (+0.96)?   (+0.47)?   (+0.78)?
+  iou              (+0.85)?      undef   (+0.96)?   (+0.47)?   (+0.78)?
+  cldice           (+0.80)?      undef   (+1.00)?   (+0.37)?   (+1.00)?
+  betti0_error     (+0.87)?      undef      undef      undef      undef
+  erl_frac         (+0.98)?      undef   (+1.00)?   (+1.00)?   (+1.00)?
+  diadem_like      (+0.65)?      undef   (+0.92)?   (-0.71)?   (+0.91)?
+
+  every cell: sign-aligned Spearman ρ, 95% cluster-bootstrap interval, acting cases / acting units, label
+
+  vs traceable length (reachable reference skeleton)
+  operator  metric              ρ  [   lo,    hi]  cases  units  label
+  break     dice           +0.850  [ +0.77,  +0.96]     20      4  inconclusive (<10 units)
+  break     cldice         +0.802  [ +0.70,  +0.96]     20      4  inconclusive (<10 units)
+  break     erl_frac       +0.979  [ +0.92,  +1.00]     20      4  inconclusive (<10 units)
+  bridge    dice            undef  [    --,    --]      5      1  undefined
+  radius    cldice         +0.366  [ -0.09,  +0.81]     16      4  inconclusive (<10 units)
+  radius    diadem_like    -0.712  [ -0.76,  -0.70]     16      4  inconclusive (<10 units)
+  ...
 
   scale: median vessel radius 5.9 px; --prune-px 17 = 3.0 vessel radii.
 
-  * CI includes zero — blind to that error type
-  ! anti-correlates — the metric moves the WRONG WAY
-  undef  the cost (or the metric) did not move under that operator, so ρ is undefined
+  labels (60 cells; definitions as in the paper's Methods):
+  undef  undefined — the cost or the metric is constant across the cell, so ρ does not exist   (18)
+  (ρ)?   inconclusive — the operator acted in fewer than 10 units or fewer than 12 cases; ρ is shown
+         for the record but is NOT a validated correlation and is never read as blind or anti-correlated   (42)
+  *      blind — the interval includes zero: the metric cannot see that error type on this data   (0)
+  !      anti-correlated — ρ is negative and the interval excludes zero: the metric moves the WRONG WAY   (0)
+         tracks — ρ is positive and the interval excludes zero   (0)
 ```
 
-(Four full-resolution FIVES masks, CC BY 4.0; the conductance block and the
-per-operator notes are omitted here.)
+(curvicost 0.2.0 on four full-resolution FIVES masks, CC BY 4.0; the
+conductance block, most of the per-cell table and the per-operator notes are
+omitted here.)
 
-Read it as a warning list. A starred cell means that metric cannot see that
-error type on your data: report it and you are reporting nothing about that
-failure mode. A `!` means the metric moves the wrong way; check first whether
-the *cost* is the right one for that error type. `undef` means the cost did not
-move at all under that operator — on these thick vessels the bridge operator
-finds one eligible tip pair in one image, so every severity yields the same
-mask — and the report says why in a note under the table. A cost that an error
-type cannot change is the wrong cost for that error type; no choice of metric
-fixes that.
+Read it as a warning list. Every (cost, operator, metric) cell carries one of
+four labels, defined exactly as in the paper's Methods, and the same label is
+written to the JSON and the CSV:
 
-Correlations are sign-aligned, so more positive always means "tracks the
-cost", whichever direction the raw metric runs.
+| label | printed as | definition |
+|---|---|---|
+| **undefined** | `undef` | the cost or the metric is constant across the cell, so no correlation exists. A statement about the cost (or the metric), not about blindness: a cost that an error type cannot change is the wrong cost for that error type, and no choice of metric fixes that. |
+| **inconclusive** | `(ρ)?` | the operator acted in fewer than **10 units** (reference masks) or fewer than **12 cases**. ρ is printed in parentheses for the record but is *not* a validated correlation and is never read as blind or anti-correlated. |
+| **blind** | `*` | the 95% cluster-bootstrap interval includes zero: that metric cannot see that error type on your data. Report it and you are reporting nothing about that failure mode. |
+| **anti-correlated** | `!` | the sign-aligned ρ is negative *and* the interval excludes zero: the metric moves the wrong way. Check first whether the *cost* is the right one for that error type. |
 
-**Give it at least three reference masks.** Confidence intervals come from
-resampling whole masks, so with fewer than three the tool reports correlations
-without CIs and says so rather than inventing them. Each operator also needs
-at least three severities; it names any it had to skip, and any whose severity
+A cell that is none of these *tracks* the cost. Correlations are sign-aligned,
+so more positive always means "tracks the cost", whichever direction the raw
+metric runs. After the grid the report lists every cell in full — ρ, its
+interval, acting cases and acting units — and the notes under it say why a
+column is undefined (on these thick vessels the bridge operator finds one
+eligible tip pair in one image, so every severity yields the same mask).
+
+**Units are reference masks, and the floors are the paper's.** The 10-unit and
+12-case floors are counted per cell, over the masks and cases in which the
+operator actually changed the mask, so a verdict of any kind needs at least
+ten masks; the FIVES example above has four, which is why every defined cell
+there is inconclusive. Below three masks the tool reports correlations without
+intervals and says so rather than inventing them. Each operator also needs at
+least three cases; the report names any it had to skip, and any whose severity
 ladder saturated on a small eligible population.
+
+**The default ladder is shortened.** An audit is a diagnostic run on your own
+machine, so by default break/bridge/truncate run at 2, 5, 10, 20 and 50 % of
+the eligible population (5 rungs), radius at ×0.7, 0.85, 1.15 and 1.3
+(4 factors), boundary at 0.5, 2, 5, 10 and 20 % of foreground voxels
+(5 levels), with one seed and a 1,000-iteration cluster bootstrap. The study
+used 7 rungs at 1, 2, 5, 10, 20, 35 and 50 %, radius ×0.5/0.7/0.85/1.15/1.3,
+boundary 0.2/0.5/1/2/5/10/20 %, 3 seeds and 2,000 iterations.
+`--severities` widens break/bridge/truncate **only**; `--radius-scales`,
+`--boundary-fracs`, `--seeds` and `--bootstrap` set the rest, and
+`--study-ladder` sets all of them to the study's values at once:
+
+```bash
+curvicost audit gt*.png --prune-px 17 --study-ladder --csv blindness.csv
+```
 
 ## Which error types does *your* method make?
 
@@ -281,8 +325,15 @@ multi-root reachable length and `conductance_frac` the Kirchhoff conductance
 described above; `traceable_single_frac` is new. Numbers from 0.1 are not
 comparable with numbers from 0.2 and must not be mixed in one table.
 
-`audit` gained `--cost`, and now separates *inconclusive* (too few units to
-resolve a correlation) from *blind* (resolved, and the interval covers zero).
+`audit` gained `--cost`, and its statistics now follow the paper's Methods
+exactly: every cell is labelled *undefined*, *inconclusive*, *blind* or
+*anti-correlated* as defined above, the 10-unit and 12-case floors are counted
+per cell over the units and cases in which the operator acted, and a cell below
+a floor is inconclusive whatever its interval says (0.2.0 counted the unit floor
+once over the whole audit and applied it only to intervals spanning zero, and
+called a cell anti-correlated only below ρ = −0.2; both are gone). The report
+prints every cell with its interval, acting cases and acting units, and the
+study's full ladder is reachable from the command line (`--study-ladder`).
 `profile` is new: it names which of the five error types a method's own
 predictions resemble, which is what makes "stratify by error type" something a
 user can act on rather than advice. The
