@@ -21,7 +21,7 @@ Scope: 2D and 3D binary curvilinear masks. Nothing else.
 """
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from .score import score, prepare_reference, METRIC_COLUMNS, COST_COLUMNS
 from .perturb import perturb, OPERATORS

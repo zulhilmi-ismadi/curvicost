@@ -155,6 +155,61 @@ boundary 0.2/0.5/1/2/5/10/20 %, 3 seeds and 2,000 iterations.
 curvicost audit gt*.png --prune-px 17 --study-ladder --csv blindness.csv
 ```
 
+### Which quantity the audit scores against
+
+A metric that tracks reachable length can be blind to the quantity you
+actually report, so the audit scores against a named quantity, and every table
+in the report is headed by it (`vs traceable length ...`). The report opens
+with the list of quantities it used.
+
+| quantity | how to select it | definition |
+|---|---|---|
+| `traceable_frac` | default | reachable length: fraction of the reference skeleton still connected to its component root |
+| `conductance_twosided` | default | Kirchhoff conductance fraction c read as min(c, 1/c) |
+| `conductance_frac` | `--cost conductance_frac` | the raw conductance fraction (can exceed 1) |
+| `traceable_single_frac` | `--cost traceable_single_frac` | reachable length from one pinned source |
+| `density_kept` | `--cost density_kept` | vessel density read from the mask alone: 1 − \|d_pred/d_ref − 1\|, d the foreground voxel count |
+| your own | `--cost-fn module:function` | any function mask → scalar |
+
+A user-supplied quantity is a plain Python function of the binary mask. It is
+applied to the reference and to each damaged copy (for the radius operator, to
+the redrawn reference that arm is scored against), and the audited value is the
+fraction c = q(damaged) / q(reference), read one-sided (`--cost-sided one`,
+the value c itself) or two-sided (`--cost-sided two`, the default, min(c, 1/c),
+so an excess counts as a loss of the same size). `module` is an importable
+module, a module in the current directory, or a path to a `.py` file:
+
+```python
+# mymeasures.py
+import numpy as np
+
+def vessel_area(mask):
+    return float(np.count_nonzero(mask))
+```
+
+```bash
+curvicost audit gt*.png --prune-px 17 --cost-fn mymeasures:vessel_area --cost-sided one \
+    --cost density_kept --cost traceable_frac --csv blindness.csv
+```
+
+The quantity appears in the report, the JSON and the CSV as `user:<function>`.
+`--cost-fn` can be repeated and is audited in addition to `--cost`.
+
+### The redraw floor
+
+Each reference is also drawn a second time from its own skeleton and radii
+(the radius operator at scale 1.0) and scored against the original. That is
+what every metric and quantity reads when the structure is right and only the
+drawing differs, as between two pipelines. The report prints, under each
+table, `redraw floor of <quantity>: median [min, max] over N mask(s)` and a
+`redraw` column with each metric's median; the CSV carries `redraw_metric` and
+`redraw_cost`, and the JSON the full `redraw_floor` block. Reachable length
+reads 1 by construction. Conductance, through its fourth-power dependence on
+radius, usually does not. A floor far from the ideal value says that absolute
+values of that quantity or metric cannot be compared between independently
+drawn masks at that level; the correlations compare copies of one drawing and
+are unaffected. `--no-redraw-floor` skips it.
+
 ## Which error types does *your* method make?
 
 The audit tells you which metric to distrust for each error type. Acting on it
@@ -314,6 +369,18 @@ your structure's own median vessel radius and warns outside 1–4 radii; the
 study's four datasets sit at 2.0–2.7. Scale it to your data (the FIVES example
 above uses 17 px on 5.9 px vessels) or the numbers are not comparable.
 
+## What changed in 0.2.1
+
+`audit` scores against a quantity the user supplies (`--cost-fn
+module:function`, read one- or two-sided with `--cost-sided`), gains the
+built-in mask quantity `density_kept`, and prints the redraw floor of every
+quantity and metric (a `redraw` column and a `redraw floor of ...` line per
+table; `redraw_metric` and `redraw_cost` in the CSV; `redraw_floor` in the
+JSON). The report now opens by naming the quantities it scored against. The
+correlations, intervals and labels of the built-in costs are unchanged: with
+`--no-redraw-floor` the CSV and JSON are identical to 0.2.0 apart from the
+version string.
+
 ## What changed in 0.2
 
 The cost definitions were replaced after a review-panel diagnostic on the
@@ -358,7 +425,7 @@ Publishing → add a GitHub publisher with owner `zulhilmi-ismadi`, repository
 To release: bump `version` in `pyproject.toml`, commit, then
 
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.1 && git push origin v0.2.1
 ```
 
 The workflow refuses to publish if the tag and the package version disagree.

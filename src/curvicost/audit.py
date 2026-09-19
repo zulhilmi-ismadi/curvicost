@@ -29,10 +29,27 @@ A cell that is none of these ``tracks`` the cost.
 The default severity ladder is a SHORTENED version of the study's, because an
 audit is a diagnostic run on the user's own machine (see ``DEFAULT_SEVERITIES``
 and ``STUDY_SEVERITIES``).
+
+Quantities. The audit scores against the two graph quantities of the study
+(reachable length, conductance), the built-in mask quantity ``density_kept``,
+and any quantity the user supplies as a function of the mask
+(``MaskQuantity`` / ``load_cost_fn``; ``--cost-fn`` on the command line).
+
+Redraw floor. ``redraw_floor`` draws each reference again from its own
+skeleton and radii (the radius operator at scale 1.0, the study's ``redraw``
+null) and scores it against the original. That is the value every metric and
+quantity already reads when nothing is wrong but the drawing, i.e. the floor
+under any comparison between two independently drawn masks.
 """
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import pathlib
+import sys
 import warnings
+from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 from scipy.stats import ConstantInputWarning, spearmanr
@@ -40,7 +57,9 @@ from scipy.stats import ConstantInputWarning, spearmanr
 from .perturb import perturb, OPERATORS
 from .score import score, prepare_reference
 
-__all__ = ["audit", "sweep", "scale_report", "label_cell", "DEFAULT_SEVERITIES",
+__all__ = ["audit", "sweep", "scale_report", "label_cell", "redraw_floor",
+           "summarise_floor", "MaskQuantity", "MASK_QUANTITIES", "load_cost_fn",
+           "user_quantity", "DEFAULT_SEVERITIES",
            "STUDY_SEVERITIES", "STUDY_SEEDS", "STUDY_N_BOOT", "COSTS", "LABELS",
            "MIN_UNITS_FOR_BLINDNESS", "MIN_CASES"]
 
@@ -98,6 +117,114 @@ HIGHER_IS_BETTER = {
 METRIC_ORDER = ("dice", "iou", "cldice", "betti0_error", "erl_frac", "diadem_like")
 
 
+# --------------------------------------------------------------------------
+# Quantities read from the mask by a function (built-in or user-supplied)
+# --------------------------------------------------------------------------
+
+#: How the ratio c = q(damaged) / q(reference) becomes the audited value.
+#:   one   c itself: a copy with more of the quantity reads above 1.
+#:   two   min(c, 1/c): an excess is charged as a loss of the same size in log
+#:         space, as for ``conductance_twosided``. c <= 0 reads 0.
+#:   kept  1 - |c - 1|: the study's reading of vessel density (``density_kept``,
+#:         manuscriptv3/analysis/mask_quantities.py). It can go below 0.
+SIDEDNESS = ("one", "two", "kept")
+
+
+@dataclass(frozen=True)
+class MaskQuantity:
+    """A downstream quantity computed from a binary mask alone.
+
+    `fn(mask) -> scalar` is applied to the reference and to each damaged copy
+    (for the radius operator, to the redrawn reference that arm is scored
+    against, as for every other cost), and the audited value is the ratio read
+    with `sided` (see ``SIDEDNESS``). A reference on which `fn` is zero or not
+    finite gives NaN, which the audit drops from the correlation.
+    """
+    name: str
+    fn: Callable
+    sided: str = "two"
+    label: str = ""
+
+    def __post_init__(self):
+        if self.sided not in SIDEDNESS:
+            raise ValueError(f"sided must be one of {SIDEDNESS}, got {self.sided!r}")
+        if not callable(self.fn):
+            raise ValueError(f"{self.name}: the quantity function is not callable")
+
+    def value(self, mask):
+        v = self.fn(np.asarray(mask).astype(bool))
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{self.name}: the quantity function must return a scalar, "
+                             f"got {type(v).__name__}") from None
+
+    def read(self, q_ref, q_pred):
+        if not (np.isfinite(q_ref) and np.isfinite(q_pred)) or q_ref == 0:
+            return float("nan")
+        c = q_pred / q_ref
+        if self.sided == "one":
+            return float(c)
+        if self.sided == "two":
+            return float(min(c, 1.0 / c)) if c > 0 else 0.0
+        return float(1.0 - abs(c - 1.0))
+
+
+def _foreground(mask):
+    return int(np.count_nonzero(mask))
+
+
+#: Built-in mask quantities, selectable with ``--cost``.
+MASK_QUANTITIES = {
+    "density_kept": MaskQuantity(
+        "density_kept", _foreground, "kept",
+        "vessel density kept (foreground fraction; 1 - |d_pred/d_ref - 1|)"),
+}
+
+
+def load_cost_fn(spec):
+    """Resolve ``"module:function"`` (or ``"path/to/file.py:function"``).
+
+    A dotted module is imported normally, with the current directory on the
+    path so a module next to the masks works without installing it.
+    """
+    mod_name, sep, fn_name = str(spec).rpartition(":")
+    if not sep or not mod_name or not fn_name:
+        raise ValueError(f"--cost-fn expects module:function, got {spec!r}")
+    if mod_name.endswith(".py"):
+        path = pathlib.Path(mod_name)
+        if not path.is_file():
+            raise FileNotFoundError(f"--cost-fn: no such file {mod_name}")
+        mspec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(mspec)
+        mspec.loader.exec_module(module)
+    else:
+        if "" not in sys.path and "." not in sys.path:
+            sys.path.insert(0, "")
+        try:
+            module = importlib.import_module(mod_name)
+        except ImportError as exc:
+            raise ValueError(f"--cost-fn: cannot import {mod_name!r} ({exc})") from None
+    fn = getattr(module, fn_name, None)
+    if fn is None or not callable(fn):
+        raise ValueError(f"--cost-fn: {mod_name!r} has no callable {fn_name!r}")
+    return fn
+
+
+def user_quantity(spec, sided="two"):
+    """A ``MaskQuantity`` for a user function named by ``module:function``."""
+    fn = load_cost_fn(spec)
+    name = "user:" + str(spec).rpartition(":")[2]
+    reading = {"one": "one-sided fraction q_pred/q_ref",
+               "two": "two-sided fraction min(c, 1/c), c = q_pred/q_ref"}.get(sided, sided)
+    return MaskQuantity(name, fn, sided, f"user-supplied {spec} ({reading})")
+
+
+def _add_quantities(row, quantities, q_ref, mask):
+    for q in quantities:
+        row[q.name] = q.read(q_ref[q.name], q.value(mask))
+
+
 def scale_report(mask, prune_px=5):
     """How big is `prune_px` in units of this mask's own vessel width?
 
@@ -122,18 +249,25 @@ def scale_report(mask, prune_px=5):
 
 
 def sweep(mask, *, severities=None, seeds=(0,), prune_px=5, with_erl=True,
-          unit="mask", on_case=None):
+          unit="mask", on_case=None, quantities=()):
     """Perturb `mask` with every operator and score each case.
 
     Yields one dict per case. The `radius` operator is scored against its own
     scale-1.0 reconstruction rather than the original mask: rasterising a
     thickness change is itself lossy, and charging that loss to the operator
     would make a purely geometric error look like a topological one.
+
+    `quantities` is a sequence of ``MaskQuantity``; each adds one column to
+    every row, read against the same reference the case is scored against.
+    Without it the rows are exactly those of 0.2.0.
     """
     severities = severities or DEFAULT_SEVERITIES
     mask = np.asarray(mask).astype(bool)
+    quantities = tuple(quantities)
     radius_ref = radius_ctx = None
     ctx = prepare_reference(mask, prune_px=prune_px, with_erl=with_erl)
+    q_base = {q.name: q.value(mask) for q in quantities}
+    q_radius = None
     rows = []
 
     for operator in OPERATORS:
@@ -149,9 +283,11 @@ def sweep(mask, *, severities=None, seeds=(0,), prune_px=5, with_erl=True,
                         radius_ref, _ = perturb(mask, "radius", 1.0, prune_px=prune_px)
                         radius_ctx = prepare_reference(radius_ref, prune_px=prune_px,
                                                        with_erl=with_erl)
-                    reference, ref_ctx = radius_ref, radius_ctx
+                    if q_radius is None:
+                        q_radius = {q.name: q.value(radius_ref) for q in quantities}
+                    reference, ref_ctx, q_ref = radius_ref, radius_ctx, q_radius
                 else:
-                    reference, ref_ctx = mask, ctx
+                    reference, ref_ctx, q_ref = mask, ctx, q_base
                 if np.array_equal(out, reference):
                     continue          # operator declined; not a data point
                 row = score(reference, out, with_erl=with_erl, prune_px=prune_px,
@@ -163,10 +299,52 @@ def sweep(mask, *, severities=None, seeds=(0,), prune_px=5, with_erl=True,
                 row.update(unit=unit, operator=operator, severity=float(sev),
                            seed=int(seed), realised=realised,
                            population=info.get("population", None))
+                _add_quantities(row, quantities, q_ref, out)
                 rows.append(row)
                 if on_case is not None:
                     on_case(row)
     return rows
+
+
+def redraw_floor(mask, *, prune_px=5, with_erl=True, unit="mask", quantities=(),
+                 reference=None):
+    """Score the reference drawn a second time from its own skeleton and radii.
+
+    The redraw is the radius operator at scale 1.0 (``perturb(mask, "radius",
+    1.0)``), the same construction the study's ``redraw`` null uses
+    (``perturb.radius_bias(gt, 1.0)``) and the reference the radius arm of
+    `sweep` is scored against. It is scored here against the ORIGINAL mask, so
+    each metric and quantity reads what it reads when two pipelines draw the
+    same structure. Ideal values are 1 (0 for ``betti0_error``); reachable
+    length is 1 by construction, conductance usually is not.
+
+    Returns one row like a `sweep` row, with ``operator == "redraw"``.
+    """
+    mask = np.asarray(mask).astype(bool)
+    redrawn, _ = perturb(mask, "radius", 1.0, prune_px=prune_px)
+    ctx = reference if reference is not None else prepare_reference(
+        mask, prune_px=prune_px, with_erl=with_erl)
+    row = score(mask, redrawn, with_erl=with_erl, prune_px=prune_px, reference=ctx)
+    quantities = tuple(quantities)
+    _add_quantities(row, quantities, {q.name: q.value(mask) for q in quantities}, redrawn)
+    row.update(unit=unit, operator="redraw", severity=1.0, seed=0)
+    return row
+
+
+def summarise_floor(floors, keys):
+    """Median, minimum and maximum over units of each key in `keys`.
+
+    Returns {key: {"median", "min", "max", "n"}}; keys with no finite value
+    get NaN and n = 0.
+    """
+    out = {}
+    for k in keys:
+        v = np.asarray([f.get(k, np.nan) for f in floors], float)
+        v = v[np.isfinite(v)]
+        out[k] = (dict(median=float(np.median(v)), min=float(v.min()), max=float(v.max()),
+                       n=int(v.size)) if v.size else
+                  dict(median=float("nan"), min=float("nan"), max=float("nan"), n=0))
+    return out
 
 
 def _bootstrap(x, y, units, n_boot, seed=0):
@@ -238,7 +416,7 @@ def label_cell(aligned_rho, ci_lo, ci_hi, n_cases, n_units, *,
 
 
 def audit(rows, *, costs=COSTS, n_boot=DEFAULT_N_BOOT, seed=0, attempted=None,
-          min_units=MIN_UNITS_FOR_BLINDNESS, min_cases=MIN_CASES):
+          min_units=MIN_UNITS_FOR_BLINDNESS, min_cases=MIN_CASES, floors=None):
     """Correlate every metric against every cost, per operator.
 
     `attempted` names the operators that were actually swept. It cannot be
@@ -257,6 +435,11 @@ def audit(rows, *, costs=COSTS, n_boot=DEFAULT_N_BOOT, seed=0, attempted=None,
     Every row in `rows` is a case in which the operator acted: `sweep` drops
     cases where the operator returned the reference unchanged, so ``n`` and
     ``n_units`` count acting cases and acting units per cell, as the paper does.
+
+    `floors` (one `redraw_floor` row per reference mask) adds the redraw floor:
+    ``result["redraw_floor"]`` holds median/min/max over masks for every cost
+    and metric, and each finding gains ``redraw_metric`` and ``redraw_cost``
+    (the medians of its metric and its cost). Correlations are not affected.
     """
     attempted = tuple(OPERATORS if attempted is None else attempted)
     notes = {}                       # operator -> list of reasons; joined on return
@@ -354,6 +537,13 @@ def audit(rows, *, costs=COSTS, n_boot=DEFAULT_N_BOOT, seed=0, attempted=None,
                        "never read as blind or anti-correlated. A percentile interval over so "
                        "few resampled units cannot separate 'no relation' from 'not enough "
                        "data'; give the audit more reference masks.")
-    return dict(n_cases=len(rows), n_units=len(units), has_ci=len(units) >= 3,
-                min_units=min_units, min_cases=min_cases, findings=findings,
-                notes=joined())
+    result = dict(n_cases=len(rows), n_units=len(units), has_ci=len(units) >= 3,
+                  min_units=min_units, min_cases=min_cases, findings=findings,
+                  notes=joined())
+    if floors:
+        summary = summarise_floor(floors, tuple(costs) + tuple(metrics))
+        for f in findings:
+            f["redraw_metric"] = summary[f["metric"]]["median"]
+            f["redraw_cost"] = summary[f["cost"]]["median"]
+        result["redraw_floor"] = dict(n_units=len(floors), values=summary)
+    return result

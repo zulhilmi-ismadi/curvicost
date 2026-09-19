@@ -326,3 +326,181 @@ def test_cli_ladder_options(tmp_path, twotrees):
     assert STUDY_SEVERITIES["break"] == (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50)
     assert STUDY_SEVERITIES["radius"] == (0.50, 0.70, 0.85, 1.15, 1.30)
     assert STUDY_SEVERITIES["boundary"] == (0.002, 0.005, 0.01, 0.02, 0.05, 0.10, 0.20)
+
+
+# --------------------------------------------------------------------------
+# 0.2.1: user-supplied quantities, density_kept, redraw floor
+# --------------------------------------------------------------------------
+
+def _foreground_count(mask):
+    """A toy user quantity: foreground voxel count."""
+    return float(np.count_nonzero(mask))
+
+
+def test_mask_quantity_sidedness():
+    from curvicost.audit import MaskQuantity
+    one = MaskQuantity("q1", _foreground_count, "one")
+    two = MaskQuantity("q2", _foreground_count, "two")
+    kept = MaskQuantity("q3", _foreground_count, "kept")
+    assert one.read(100.0, 150.0) == pytest.approx(1.5)
+    assert two.read(100.0, 150.0) == pytest.approx(1 / 1.5)
+    assert two.read(100.0, 50.0) == pytest.approx(0.5)
+    assert two.read(100.0, 0.0) == 0.0
+    assert kept.read(100.0, 150.0) == pytest.approx(0.5)
+    assert kept.read(100.0, 80.0) == pytest.approx(0.8)
+    assert np.isnan(one.read(0.0, 5.0)), "a zero reference has no fraction"
+    with pytest.raises(ValueError):
+        MaskQuantity("bad", _foreground_count, "three")
+
+
+def test_density_kept_is_the_studys_definition(twotrees):
+    """1 - |d_pred/d_ref - 1|, d the foreground count (mask_quantities.py), with the
+    radius arm read against its own redrawn reference."""
+    from curvicost.audit import MASK_QUANTITIES
+    q = MASK_QUANTITIES["density_kept"]
+    rows = sweep(twotrees, severities=FAST, unit="t", quantities=[q])
+    radius_ref, _ = curvicost.perturb(twotrees, "radius", 1.0)
+    for r in rows:
+        base = radius_ref if r["operator"] == "radius" else twotrees
+        out, _ = curvicost.perturb(twotrees, r["operator"], r["severity"], seed=r["seed"])
+        expect = 1.0 - abs(out.sum() / base.sum() - 1.0)
+        assert r["density_kept"] == pytest.approx(expect, abs=1e-12), r["operator"]
+
+
+def test_quantities_leave_existing_columns_untouched(twotrees, rows):
+    from curvicost.audit import MASK_QUANTITIES
+    with_q = sweep(twotrees, severities=FAST, unit="twotrees",
+                   quantities=[MASK_QUANTITIES["density_kept"]])
+    assert len(with_q) == len(rows)
+    for a, b in zip(rows, with_q):
+        assert set(b) - set(a) == {"density_kept"}
+        for k in a:
+            assert json.dumps(a[k]) == json.dumps(b[k]), k
+    base = audit(rows, n_boot=30)
+    both = audit(with_q, n_boot=30, costs=("traceable_frac", "conductance_twosided", "density_kept"))
+    old = [f for f in both["findings"] if f["cost"] != "density_kept"]
+    assert json.dumps(base["findings"]) == json.dumps(old)
+
+
+@pytest.mark.parametrize("sided", ["one", "two"])
+def test_cli_cost_fn_both_sidedness(tmp_path, twotrees, sided, monkeypatch, capsys):
+    from curvicost.io import save_mask
+    mod = tmp_path / "toy_quantities.py"
+    mod.write_text("import numpy as np\n"
+                   "def area(mask):\n    return float(np.count_nonzero(mask))\n")
+    monkeypatch.chdir(tmp_path)
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    j = tmp_path / "a.json"
+    rc = main(["audit", str(p), "--json", str(j), "--include-cases", "--n-boot", "5",
+               "--severities", "0.1,0.3,0.5", "--cost-fn", "toy_quantities:area",
+               "--cost-sided", sided])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "vs user-supplied toy_quantities:area" in out
+    assert ("one-sided" if sided == "one" else "two-sided") in out
+    res = json.loads(j.read_text())
+    assert res["cost_sided"] == {"user:area": sided}
+    assert any(f["cost"] == "user:area" for f in res["findings"])
+    # built-in defaults are still audited beside the user quantity
+    assert {f["cost"] for f in res["findings"]} == {"traceable_frac", "conductance_twosided",
+                                                    "user:area"}
+    radius_ref, _ = curvicost.perturb(twotrees, "radius", 1.0)
+    vals = []
+    for r in res["cases"]:
+        base = radius_ref if r["operator"] == "radius" else twotrees
+        out_m, _ = curvicost.perturb(twotrees, r["operator"], r["severity"], seed=r["seed"])
+        c = out_m.sum() / base.sum()
+        expect = c if sided == "one" else min(c, 1 / c)
+        assert r["user:area"] == pytest.approx(expect, abs=1e-12)
+        vals.append(r["user:area"])
+    if sided == "one":
+        assert max(vals) > 1.0, "a thickening must read above 1 one-sided"
+    else:
+        assert max(vals) <= 1.0
+
+
+def test_cli_cost_fn_accepts_a_file_path(tmp_path, twotrees):
+    from curvicost.io import save_mask
+    mod = tmp_path / "q.py"
+    mod.write_text("def half(mask):\n    return mask.sum() / 2.0\n")
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    c = tmp_path / "a.csv"
+    assert main(["audit", str(p), "--csv", str(c), "--quiet", "--n-boot", "5",
+                 "--severities", "0.1,0.3,0.5", "--cost-fn", f"{mod}:half"]) == 0
+    assert "user:half" in c.read_text()
+
+
+def test_cli_cost_fn_bad_spec_is_a_clean_error(tmp_path, twotrees, capsys):
+    from curvicost.io import save_mask
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    assert main(["audit", str(p), "--quiet", "--cost-fn", "no_colon_here"]) == 2
+    assert main(["audit", str(p), "--quiet", "--cost-fn", "curvicost_no_such_mod:f"]) == 2
+    assert main(["audit", str(p), "--quiet", "--cost-fn", "numpy:no_such_function"]) == 2
+    assert "--cost-fn" in capsys.readouterr().err
+
+
+def test_redraw_floor_scores_the_redrawn_reference(twotrees):
+    from curvicost.audit import redraw_floor, MASK_QUANTITIES
+    from curvicost.score import score
+    q = MASK_QUANTITIES["density_kept"]
+    row = redraw_floor(twotrees, unit="t", quantities=[q])
+    redrawn, _ = curvicost.perturb(twotrees, "radius", 1.0)
+    direct = score(twotrees, redrawn)
+    for k in ("dice", "cldice", "erl_frac", "traceable_frac", "conductance_twosided"):
+        assert row[k] == pytest.approx(direct[k], abs=1e-12), k
+    assert row["traceable_frac"] == pytest.approx(1.0), "the redraw keeps the centre line"
+    assert row["density_kept"] == pytest.approx(1 - abs(redrawn.sum() / twotrees.sum() - 1))
+    assert row["operator"] == "redraw" and row["unit"] == "t"
+
+
+def test_audit_attaches_redraw_floor(tree2d, twotrees):
+    from curvicost.audit import redraw_floor
+    rows, floors = [], []
+    for i, m in enumerate((tree2d, twotrees, tree2d[::-1])):
+        rows += sweep(m, severities={"break": (0.1, 0.3, 0.5)}, unit=f"u{i}")
+        floors.append(redraw_floor(m, unit=f"u{i}"))
+    plain = audit(rows, n_boot=30)
+    res = audit(rows, n_boot=30, floors=floors)
+    fl = res["redraw_floor"]
+    assert fl["n_units"] == 3
+    d = [f["conductance_twosided"] for f in floors]
+    assert fl["values"]["conductance_twosided"]["median"] == pytest.approx(np.median(d))
+    assert fl["values"]["conductance_twosided"]["min"] == pytest.approx(min(d))
+    for f, g in zip(res["findings"], plain["findings"]):
+        assert f["redraw_metric"] == pytest.approx(fl["values"][f["metric"]]["median"])
+        assert f["redraw_cost"] == pytest.approx(fl["values"][f["cost"]]["median"])
+        assert json.dumps({k: v for k, v in f.items()
+                           if k not in ("redraw_metric", "redraw_cost")}) == json.dumps(g)
+
+
+def test_cli_prints_redraw_floor_and_writes_it(tmp_path, twotrees, capsys):
+    from curvicost.io import save_mask
+    import csv as _csv
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    c = tmp_path / "a.csv"
+    main(["audit", str(p), "--csv", str(c), "--severities", "0.1,0.3,0.5", "--n-boot", "5",
+          "--cost", "traceable_frac", "--cost", "density_kept"])
+    out = capsys.readouterr().out
+    assert "redraw floor of traceable_frac: 1.000" in out
+    assert "redraw floor of density_kept:" in out
+    assert "redraw" in out.split("vs traceable length")[1].splitlines()[1]
+    # the quantity heads each table and the report opens by naming it
+    assert "scored against:" in out.split("vs ")[0]
+    assert "vs traceable length (reachable reference skeleton)" in out
+    assert "vs vessel density kept" in out
+    rows_ = list(_csv.DictReader(c.open()))
+    assert {"redraw_metric", "redraw_cost"} <= set(rows_[0])
+    tr = [r for r in rows_ if r["cost"] == "traceable_frac"]
+    assert all(float(r["redraw_cost"]) == pytest.approx(1.0) for r in tr)
+
+
+def test_cli_no_redraw_floor_keeps_the_020_columns(tmp_path, twotrees, capsys):
+    from curvicost.io import save_mask
+    p = save_mask(twotrees, tmp_path / "m.npy")
+    c = tmp_path / "a.csv"
+    main(["audit", str(p), "--csv", str(c), "--severities", "0.1,0.3,0.5", "--n-boot", "5",
+          "--no-redraw-floor"])
+    assert "redraw" not in capsys.readouterr().out
+    assert c.read_text().splitlines()[0] == ("cost,operator,metric,n,n_units,aligned_rho,ci_lo,"
+                                             "ci_hi,label,reason,undefined,inconclusive,blind,"
+                                             "anti,cost_constant")

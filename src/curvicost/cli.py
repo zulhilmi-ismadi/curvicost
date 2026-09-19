@@ -75,7 +75,9 @@ def _cmd_score(args):
 
 _COST_LABEL = {"traceable_frac": "traceable length (reachable reference skeleton)",
                "conductance_twosided": "conductance (Kirchhoff, two-sided: excess is loss)",
-               "conductance_frac": "conductance (Kirchhoff, raw fraction retained)"}
+               "conductance_frac": "conductance (Kirchhoff, raw fraction retained)",
+               "traceable_single_frac": "traceable length (single pinned source)",
+               "density_kept": "vessel density kept (foreground fraction; 1 - |d_pred/d_ref - 1|)"}
 
 
 _LABEL_MARK = {"blind": "*", "anti-correlated": "!", "inconclusive": "?", "tracks": " "}
@@ -91,8 +93,17 @@ def _audit_report(result, stream):
     metrics = [m for m in METRIC_ORDER if any(f["metric"] == m for f in findings)]
     min_units = result.get("min_units", 10)
     min_cases = result.get("min_cases", 12)
+    labels = dict(_COST_LABEL, **result.get("cost_labels", {}))
+    label_of = lambda c: labels.get(c, c)
+    floor = result.get("redraw_floor")
+    fv = floor["values"] if floor else {}
     print(f"\n{result['n_cases']} cases from {result['n_units']} reference mask(s)",
           file=stream)
+    costs = list(dict.fromkeys(f["cost"] for f in findings))
+    if costs:
+        print("scored against:", file=stream)
+        for c in costs:
+            print(f"  {c:<22} {label_of(c)}", file=stream)
     if not result["has_ci"]:
         print("⚠  fewer than 3 reference masks: correlations are reported WITHOUT "
               "confidence\n   intervals, and blindness cannot be judged. Treat these as "
@@ -102,11 +113,14 @@ def _audit_report(result, stream):
         return next((f for f in findings if f["cost"] == cost and f["operator"] == op
                      and f["metric"] == m), None)
 
-    costs = list(dict.fromkeys(f["cost"] for f in findings))
+    def fl(key):
+        v = fv.get(key)
+        return f"{v['median']:.3f}" if v and v["n"] else "--"
+
     for cost in costs:
-        print(f"\n  vs {_COST_LABEL.get(cost, cost)}", file=stream)
-        print("  " + "metric".ljust(14) + "".join(o.rjust(11) for o in OPERATORS),
-              file=stream)
+        print(f"\n  vs {label_of(cost)}", file=stream)
+        print("  " + "metric".ljust(14) + "".join(o.rjust(11) for o in OPERATORS)
+              + ("     redraw" if floor else ""), file=stream)
         for m in metrics:
             cells = ""
             for op in OPERATORS:
@@ -121,13 +135,21 @@ def _audit_report(result, stream):
                     cells += f"{'(' + format(f['aligned_rho'], '+.2f') + ')':>10}?"
                 else:
                     cells += f"{f['aligned_rho']:>+10.2f}{_LABEL_MARK[f['label']]}"
+            if floor:
+                cells += fl(m).rjust(11)
             print("  " + m.ljust(14) + cells, file=stream)
+        if floor:
+            v = fv.get(cost)
+            rng = (f"{v['median']:.3f} [min {v['min']:.3f}, max {v['max']:.3f}]"
+                   if v and v["n"] else "undefined")
+            print(f"  redraw floor of {cost}: {rng} over {floor['n_units']} mask(s)",
+                  file=stream)
 
     # Every cell in full. The grid above is the summary; this is the evidence.
     print("\n  every cell: sign-aligned Spearman ρ, 95% cluster-bootstrap interval, acting "
           "cases / acting units, label", file=stream)
     for cost in costs:
-        print(f"\n  vs {_COST_LABEL.get(cost, cost)}", file=stream)
+        print(f"\n  vs {label_of(cost)}", file=stream)
         print("  " + "operator".ljust(10) + "metric".ljust(14) + "ρ".rjust(7)
               + "  [   lo,    hi]" + "  cases" + "  units" + "  label", file=stream)
         for op in OPERATORS:
@@ -179,10 +201,17 @@ def _audit_report(result, stream):
           f"metric moves the WRONG WAY   ({count('anti-correlated')})", file=stream)
     print(f"         tracks — ρ is positive and the interval excludes zero   "
           f"({count('tracks')})", file=stream)
+    if floor:
+        print("\n  redraw floor: each reference is drawn a second time from its own skeleton and "
+              "radii and\n  scored against the original (median [min, max] over masks; the "
+              "'redraw' column is each\n  metric's median; ideal 1, betti0_error 0). A value far "
+              "from ideal means that quantity\n  or metric cannot compare two independently "
+              "drawn masks at that level. The correlations\n  compare copies of one drawing "
+              "and are not affected.", file=stream)
     anti = [f for f in findings if f["label"] == "anti-correlated"]
     if anti:
         worst = min(anti, key=lambda f: f["aligned_rho"])
-        print(f"    worst: {worst['metric']} vs {_COST_LABEL.get(worst['cost'], worst['cost'])} on "
+        print(f"    worst: {worst['metric']} vs {label_of(worst['cost'])} on "
               f"{worst['operator']} (ρ {worst['aligned_rho']:+.2f}). When the metric "
               f"moves the wrong way on an\n    error type, check first whether the "
               "cost is the right one for that error type.", file=stream)
@@ -196,8 +225,18 @@ def _cmd_audit(args):
     import json as _json
 
     import numpy as np
-    from .audit import (sweep, audit, scale_report, DEFAULT_SEVERITIES, STUDY_SEVERITIES,
+    from .audit import (sweep, audit, scale_report, redraw_floor, user_quantity,
+                        MASK_QUANTITIES, DEFAULT_SEVERITIES, STUDY_SEVERITIES,
                         STUDY_SEEDS, STUDY_N_BOOT, COSTS, MIN_UNITS_FOR_BLINDNESS, MIN_CASES)
+
+    costs = list(args.cost) if args.cost else list(COSTS)
+    quantities = [MASK_QUANTITIES[c] for c in dict.fromkeys(costs) if c in MASK_QUANTITIES]
+    for spec in args.cost_fn or ():
+        q = user_quantity(spec, args.cost_sided)
+        if q.name in costs:
+            raise ValueError(f"--cost-fn {spec}: a quantity named {q.name} is already audited")
+        quantities.append(q)
+        costs.append(q.name)
 
     if args.study_ladder:
         severities = dict(STUDY_SEVERITIES)
@@ -216,7 +255,7 @@ def _cmd_audit(args):
     if args.boundary_fracs:
         severities["boundary"] = _parse_floats(args.boundary_fracs)
 
-    rows, seeds, scales = [], tuple(range(n_seeds)), []
+    rows, seeds, scales, floors = [], tuple(range(n_seeds)), [], []
     for path in args.masks:
         mask, _ = load_mask(path)
         if not args.quiet:
@@ -224,12 +263,21 @@ def _cmd_audit(args):
         scales.append(scale_report(mask, args.prune_px))
         rows += sweep(mask, severities=severities, seeds=seeds,
                       prune_px=args.prune_px, with_erl=not args.no_erl,
-                      unit=str(path))
+                      unit=str(path), quantities=quantities)
+        if not args.no_redraw_floor:
+            floors.append(redraw_floor(mask, prune_px=args.prune_px,
+                                       with_erl=not args.no_erl, unit=str(path),
+                                       quantities=quantities))
     attempted = [op for op in severities if severities.get(op)]
-    kw = dict(costs=tuple(args.cost) if args.cost else COSTS,
+    kw = dict(costs=tuple(costs),
               min_units=args.min_units if args.min_units is not None else MIN_UNITS_FOR_BLINDNESS,
               min_cases=args.min_cases if args.min_cases is not None else MIN_CASES)
-    result = audit(rows, n_boot=n_boot, attempted=attempted, **kw)
+    result = audit(rows, n_boot=n_boot, attempted=attempted, floors=floors or None, **kw)
+    if quantities:
+        result["cost_labels"] = {q.name: q.label for q in quantities}
+        result["cost_sided"] = {q.name: q.sided for q in quantities}
+    if floors and args.include_cases and "redraw_floor" in result:
+        result["redraw_floor"]["cases"] = floors
     result["ladder"] = dict(severities={k: list(v) for k, v in severities.items()},
                             seeds=list(seeds), n_boot=n_boot,
                             prune_px=args.prune_px, version=__version__)
@@ -401,7 +449,16 @@ def build_parser():
             "                  but is not a validated correlation; never read as blind/anti)\n"
             "  blind           the 95% cluster-bootstrap interval includes zero\n"
             "  anti-correlated sign-aligned rho < 0 and the interval excludes zero\n"
-            "Units are reference masks, so a cell can only leave 'inconclusive' with 10+ masks."
+            "Units are reference masks, so a cell can only leave 'inconclusive' with 10+ masks.\n"
+            "\n"
+            "Quantities: traceable_frac and conductance_twosided by default; --cost adds\n"
+            "conductance_frac, traceable_single_frac or density_kept; --cost-fn adds your own\n"
+            "function of the mask, e.g.  --cost-fn mymeasures:tortuosity --cost-sided one\n"
+            "Each table is headed by the quantity it was scored against.\n"
+            "\n"
+            "Redraw floor: each reference is drawn again from its own skeleton and radii and\n"
+            "scored against the original; the report prints the median per quantity and per\n"
+            "metric ('redraw' column), and the CSV carries redraw_metric and redraw_cost."
         ))
     a.add_argument("masks", nargs="+",
                    help="reference binary masks (3+ for intervals, 10+ for any verdict)")
@@ -409,9 +466,21 @@ def build_parser():
     a.add_argument("--csv", metavar="PATH", help="write the findings table as CSV")
     a.add_argument("--cost", action="append", metavar="NAME",
                    choices=["traceable_frac", "conductance_twosided", "conductance_frac",
-                            "traceable_single_frac"],
-                   help="cost to correlate against; repeatable "
-                        "(default: traceable_frac and conductance_twosided)")
+                            "traceable_single_frac", "density_kept"],
+                   help="built-in quantity to correlate against; repeatable "
+                        "(default: traceable_frac and conductance_twosided). "
+                        "density_kept = 1 - |d_pred/d_ref - 1|, d the foreground voxel count")
+    a.add_argument("--cost-fn", action="append", metavar="MODULE:FUNCTION",
+                   help="a quantity of your own: a function mask -> scalar, applied to the "
+                        "reference and to each damaged copy and read as a fraction of the "
+                        "reference value (see --cost-sided). MODULE is importable or a path "
+                        "to a .py file; repeatable; audited in addition to --cost")
+    a.add_argument("--cost-sided", choices=["one", "two"], default="two",
+                   help="how --cost-fn fractions c = q_pred/q_ref are read: 'one' uses c, "
+                        "'two' uses min(c, 1/c) so an excess counts as a loss (default two)")
+    a.add_argument("--no-redraw-floor", action="store_true",
+                   help="skip the redraw floor (each reference drawn again from its own "
+                        "skeleton and radii and scored against the original)")
     a.add_argument("--min-units", type=int, default=None, metavar="N",
                    help="a cell in which the operator acted in fewer than N reference masks "
                         "is inconclusive (default 10, the paper's floor)")
@@ -438,7 +507,7 @@ def build_parser():
     a.add_argument("--no-erl", action="store_true")
     a.add_argument("--prune-px", type=int, default=5, metavar="N")
     a.add_argument("--include-cases", action="store_true",
-                   help="also write every scored case into the JSON")
+                   help="also write every scored case (and each redraw-floor row) into the JSON")
     a.add_argument("--quiet", action="store_true")
     a.set_defaults(func=_cmd_audit)
     return parser
