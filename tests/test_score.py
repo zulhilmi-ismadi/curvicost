@@ -122,7 +122,7 @@ def test_two_sided_conductance_charges_excess(tree2d):
 def test_root_loss_does_not_zero_the_cost(tree2d):
     """Truncating the branch that holds a component's root must not count the whole
     component as unreachable: the component is traced from its nearest surviving
-    reference-skeleton voxel instead (study v7 root fallback)."""
+    reference-skeleton voxel instead (the root fallback)."""
     from scipy import ndimage
     from skimage.morphology import skeletonize
     from curvicost._core.reach import ref_roots_for

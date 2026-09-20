@@ -265,7 +265,7 @@ def radius_bias(mask, scale, skel=None, radius_map=None, min_radius=1.0,
     mask: erosion snaps thin branches (changing Betti-0) and dilation fuses
     neighbours (changing Betti-1), which would make this operator leak into the
     topology channel. Radii are clamped at `min_radius` so nothing vanishes.
-    STUDY-PLAN 4.1 requires Betti numbers to survive this operator untouched.
+    The design requires Betti numbers to survive this operator untouched.
 
     NOTE the reference for this arm is `radius_bias(mask, 1.0)`, NOT the original
     mask: the union-of-balls reconstruction is systematically fatter than the
@@ -320,15 +320,14 @@ def _grow_room(mask, scale, radius_map):
 # ---------------------------------------------------------------------------
 # Severity scaling
 # ---------------------------------------------------------------------------
-# EXECUTION-PLAN.md:86 specifies severity as a FRACTION of the available
+# The design specifies severity as a FRACTION of the available
 # targets ("breaks: 1%, 2%, 5%, 10%, 20% of edges"). The runners originally
 # used an absolute count ladder [1,2,4,8,16], which is a heavy perturbation on
 # a ~200-edge retina graph and a no-op on a ~7000-edge VesSAP block: at top
 # severity it removed 25-44% of traceable length in the 2D/tree cells but only
-# 0.2% in VesSAP, leaving that cell with no signal to correlate. See
-# results/analysis/GATE-R.md.
-# Extended 2026-09-02 after item 12: the original top severity (0.20) left every
-# perturbation milder than STARE's inter-observer disagreement (harshest
+# 0.2% in VesSAP, leaving that cell with no signal to correlate.
+# The ladder was extended after scoring a second annotator: the original top
+# severity (0.20) left every perturbation milder than STARE's inter-observer disagreement (harshest
 # synthetic Dice 0.805 vs observer 0.740). 0.35/0.50 verified leak-free on the
 # operator invariants (6 images x 3 seeds) before adoption.
 FRAC_LADDER = (0.01, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50)

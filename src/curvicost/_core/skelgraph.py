@@ -6,7 +6,7 @@ between two of them, carrying its arc length and mean radius (from the distance
 transform of the original mask, so radius is real thickness, not skeleton width).
 
 This is the step DIADEM let us skip. Everything here is the part of the pipeline
-that Gate P's retina half exists to test.
+that the retinal vessel cases exercise.
 """
 from __future__ import annotations
 
@@ -159,8 +159,8 @@ def prune_spurs(G, min_length):
     """Drop degree-1 branches shorter than min_length. Returns (G, n_removed).
 
     Skeletonisation of a noisy mask sprouts short false branches; how many, and
-    how sensitive the graph is to this threshold, is exactly what Gate P's
-    retina half must quantify.
+    how sensitive the graph is to this threshold, is what the retinal
+    cases quantify.
     """
     G = G.copy()
     removed = 0

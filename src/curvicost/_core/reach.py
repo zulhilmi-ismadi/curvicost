@@ -4,7 +4,7 @@ Traceable length is measured on the REFERENCE skeleton, not on a re-skeletonised
 perturbed mask: the count of reference-skeleton voxels that lie in the connected
 component of the perturbed mask containing the reference root. Re-skeletonising
 the cut faces of a break inflated the graph-based value above 1 in half the
-vascular break cases (review panel v1, 2026-09-07); counting reference voxels
+vascular break cases; counting reference voxels
 through the perturbed mask's own connectivity is immune to that, and is bounded
 by 1 from above by construction.
 
@@ -16,10 +16,10 @@ Two variants, both used by the study:
                      a boundary-clipped block) is fully covered. This is the
                      study's cost of record on the three length cells.
 
-Root fallback (v7, 2026-09-08). Review panel v2's regenerated operator gallery
+Root fallback. A regenerated operator gallery
 showed a 3D-tree truncation case at Dice 0.87 with reachable length 0.00: the
 root of a single-component trace sat on the terminal branch the operator
-erased, the v6 code looked for any mask voxel within a 3-voxel box, found none,
+erased, the earlier code looked for any mask voxel within a 3-voxel box, found none,
 and counted the whole component as lost (15 of 504 3D-tree and 5 of 1,092
 2D-tree truncate cases). The root is a bookkeeping choice, not a biological
 one, so losing the root voxel must not lose the component. When the root voxel
@@ -27,7 +27,7 @@ is not foreground in the perturbed mask, the component is now traced from the
 nearest SURVIVING reference-skeleton voxel of that same reference component
 (the analogue of the pinned source, which attaches to the nearest graph node).
 A component is lost only when none of its reference-skeleton voxels survives.
-Whenever the root voxel survives the value is identical to v6.
+Whenever the root voxel survives the value is identical to the earlier code's.
 
 The counting is vectorised over skeleton voxels (a pair histogram of reference
 label x perturbed label) rather than a per-component pass over the volume; the
@@ -74,7 +74,7 @@ def reach_count(mask, ref_skel, src_pos, ref_lab=None):
 
     With `ref_lab` (the labelled reference), a destroyed source voxel falls back to
     the nearest surviving reference-skeleton voxel of the source's own reference
-    component. Without it, the v6 behaviour (nearest mask voxel within 6) is kept."""
+    component. Without it, the earlier behaviour (nearest mask voxel within 6) is kept."""
     lab, n = _label(mask)
     if n == 0:
         return 0

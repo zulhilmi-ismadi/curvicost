@@ -383,7 +383,7 @@ version string.
 
 ## What changed in 0.2
 
-The cost definitions were replaced after a review-panel diagnostic on the
+The cost definitions were replaced after a diagnostic on the
 accompanying study found four defects in the 0.1 costs (a break operator that
 sometimes only constricted, a source that moved under perturbation, a
 traceable length inflated by re-skeletonised cut faces, and a path-sum

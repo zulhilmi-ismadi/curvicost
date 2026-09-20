@@ -34,12 +34,12 @@ def analyse(mask, prune_px=5, sink_positions=None, source_pos=None, source_posit
     `source_pos` pins the source to the reference's source LOCATION (nearest
     graph node). Without it the source is re-picked as the maximum-radius node
     of each perturbed graph, and a break near the reference source moved it to
-    another trunk, raising conductance by 26% on STARE im0077 at 20% breaks
-    (review panel v1, 2026-09-07). The reference itself is analysed with
+    another trunk, raising conductance by 26% on STARE im0077 at 20% breaks.
+    The reference itself is analysed with
     source_pos=None and its source position passed to every perturbed case.
 
     `terminal_resistances` is a ladder of lumped terminal resistances for the
-    boundary-condition sensitivity (review panel v2, R7). The cost of record is
+    boundary-condition sensitivity. The cost of record is
     always the ideal-ground solve in `conductance_k`; each requested R_t is solved
     on the SAME assembled network and returned, in order, in `conductance_k_bc`,
     so a ladder costs one graph build and one extra linear solve per rung.

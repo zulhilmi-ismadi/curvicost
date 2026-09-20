@@ -82,8 +82,7 @@ def break_edges(G, n_breaks, seed, mask=None, radius_map=None, sever=True, max_g
     Thickness is taken from the mask's own distance transform at the midpoint
     (never from an external radius map: the VesSAP radius file is zero on most
     skeleton voxels, and sizing the ball from it left ~80% of 3D cuts as
-    constrictions rather than breaks -- found 2026-09-07 by the review-panel
-    diagnostic, code/diag_flip_traceable.py). With `sever=True` every cut is
+    constrictions rather than breaks). With `sever=True` every cut is
     verified in a local crop: the ball grows by one voxel at a time (up to
     `max_grow`) until the two sides of the branch fall into different
     connected components. The returned info counts cuts that could not be
@@ -258,10 +257,9 @@ def conductance_kirchhoff(G, source, sink_positions, mask=None, radius_map=None,
     is split there. A terminal that a bridge turned into a through-point keeps its
     sink (it still exists); a terminal a break punched away loses it. This replaces
     the terminal-node-only rule, under which bridges read as a 41% conductance
-    loss (review panel v1, 2026-09-07).
+    loss.
 
-    `terminal_resistance` is the boundary condition on the sinks (review panel v2,
-    R7). At the default 0.0 every surviving sink is an ideal ground held at zero
+    `terminal_resistance` is the boundary condition on the sinks. At the default 0.0 every surviving sink is an ideal ground held at zero
     pressure, which is the model of record. Given a positive value R_t, the sinks
     are instead free nodes that drain to a single common ground through a lumped
     resistance R_t each -- the downstream bed the imaged network empties into. The

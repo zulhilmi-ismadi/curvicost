@@ -125,8 +125,8 @@ METRIC_ORDER = ("dice", "iou", "cldice", "betti0_error", "erl_frac", "diadem_lik
 #:   one   c itself: a copy with more of the quantity reads above 1.
 #:   two   min(c, 1/c): an excess is charged as a loss of the same size in log
 #:         space, as for ``conductance_twosided``. c <= 0 reads 0.
-#:   kept  1 - |c - 1|: the study's reading of vessel density (``density_kept``,
-#:         manuscriptv3/analysis/mask_quantities.py). It can go below 0.
+#:   kept  1 - |c - 1|: the study's reading of vessel density (``density_kept``).
+#:         It can go below 0.
 SIDEDNESS = ("one", "two", "kept")
 
 

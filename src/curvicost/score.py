@@ -4,7 +4,7 @@ The point of this package is the second column. Dice tells you how many voxels
 you got; it does not tell you what the errors cost the biology. `score()`
 returns both, from one pass, so the two can be compared on the same case.
 
-The cost definitions are the study's (its "v7" data of record, 2026-09-08),
+The cost definitions are the study's,
 composed here exactly as the study's re-score script composes them:
 
 * **Reachable length** (`traceable_frac`). The reference is skeletonised once.
