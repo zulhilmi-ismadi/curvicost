@@ -22,6 +22,20 @@ pip install curvicost          # core
 pip install "curvicost[io]"    # + TIFF / NIfTI / PNG loading
 ```
 
+## What to give it
+
+| | |
+|---|---|
+| **Reference** | One binary mask of the structure, from your annotation. Every command needs it except `perturb`, which damages the mask you give it. |
+| **Prediction** | One binary mask per image from your method, already thresholded. `score` takes one per call; `profile` takes several from one method. |
+| **Format** | PNG, TIFF, NIfTI or `.npy`. Any non-zero value is foreground, so 0/1 and 0/255 both work. Avoid JPEG: compression creates grey levels and the file is rejected as non-binary. An RGB PNG is read from its first channel. |
+| **Naming** | Anything. Masks are identified by the paths you pass; nothing is read from file names, and no label or header is needed. |
+| **Size** | Prediction and reference must have the same shape. `score` stops with an error on a mismatch; `profile` skips the file and says so. |
+| **How many** | `score`: one prediction and its reference. `profile`: one reference, any number of predictions from one method. `audit`: reference masks only, no predictions, and at least **10** of them for a verdict (below that every cell is inconclusive). |
+| **Scale** | Set `--prune-px` to about 1 to 4 median vessel radii of your data. `audit` prints the ratio and warns outside that range. The default of 5 is wrong for full-resolution images. |
+| **Voxels** | Isotropic. Voxel size is read from NIfTI headers but not applied. |
+| **Not accepted** | Probability maps and multi-label images. Threshold or extract one structure first; the tool will not choose a threshold. |
+
 ## Use
 
 ```bash
@@ -63,6 +77,34 @@ Generate a graded, typed error from the command line:
 ```bash
 curvicost perturb gt.tif --operator break --severity 0.1 -o broken.tif
 ```
+
+## Reading the numbers
+
+Every `score` row has metrics (how well the mask matches) and costs (what the structure can still do). All costs are fractions of the reference's own value.
+
+| column | reads | better | range |
+|---|---|---|---|
+| `dice`, `iou`, `cldice` | overlap of the masks, or of their skeletons for `cldice` | **higher** | 0 to 1; 1 is identical |
+| `betti0_error` | absolute difference in the number of connected pieces | **lower** | 0 upward; 0 is the same count |
+| `erl_frac` | expected run length: how far you can walk along the reference skeleton before meeting an error, relative to the reference's own value | **higher** | 0 to 1 |
+| `diadem_like` | share of reference nodes (length-weighted) with a predicted node within 6 px | **higher** | 0 to 1 |
+| `traceable_frac` | reference skeleton still reachable from its root | **higher** | 0 to 1; 1 = all reachable |
+| `traceable_single_frac` | the same from one pinned source | **higher** | can exceed 1 on a fragmented reference |
+| `conductance_frac` | hydraulic conductance retained | **higher, up to 1** | can exceed 1 when the prediction is thicker or has false connections |
+| `conductance_twosided` | `min(c, 1/c)` of the above, so an excess counts as a loss | **higher** | 0 to 1 |
+| `perfused_of_self` | share of the prediction's own skeleton that is reachable | **higher** | 0 to 1 |
+
+A cost of 0.85 means 85% of that function survives. The tool sets no pass mark:
+what counts as acceptable depends on what you will use the segmentation for.
+The metric and the cost answer different questions, so read them side by side
+and note where they disagree; that is the point of the tool.
+
+`audit` prints a different kind of number. Its ρ is not a score of a
+segmentation. It is a rank correlation, over many damaged copies of your
+reference masks, between a metric and a cost: +1 means the metric orders the
+cases exactly as the cost does, 0 means no relation, negative means it orders
+them the wrong way. It is sign-aligned, so a lower-is-better metric such as
+`betti0_error` is read the same way as the others.
 
 ## Which error types is your metric blind to?
 
@@ -258,6 +300,93 @@ real methods the residual is much larger, and a large residual means the model
 does not span what your method does. The shares are still the right place to
 start reading the audit, but they are not the whole error.
 
+
+## Which metric should I report?
+
+The tool gives you the evidence; the choice is yours, and it goes in this order.
+
+1. **Name the quantity you will report** from the segmentation: reachable length,
+   flow, vessel density, or your own (`--cost-fn`). The right metric depends on it.
+2. **Run `audit` on at least 10 reference masks**, scored against that quantity.
+3. **Run `profile` on your method's predictions** to see which error types it makes.
+4. **Read the `audit` columns for those error types.** Report the metric that
+   *tracks* the cost there, with the ρ per error type beside any pooled value.
+   Do not report a metric marked `*` (blind) or `!` (anti-correlated) for an error
+   type your method makes.
+5. **If you hold both masks, report the cost itself as well.** The metric is the
+   stand-in for when only scores are published.
+
+The paper's recommendations, for the structures it studied:
+
+| structure, quantity | report | note |
+|---|---|---|
+| retina and neurites, reachable length | expected run length (`erl_frac`) | ρ of at least +0.97 on breaks. Undefined for false connections. The noisiest metric between random seeds. |
+| brain vessels, flow conductance | Dice | ρ +0.78 on breaks, but only +0.31 when the amount of damage is fixed. |
+| a quantity read from the mask, such as vessel density | Dice | the ranking reverses: Dice follows it almost exactly and ERL does not. |
+| networks that mostly shorten branches | centreline Dice | in the paper's twelve trained networks it ordered pairs of models better than ERL. `profile` tells you whether this is you. |
+
+None of this transfers to another structure or quantity without the audit, which
+is what step 2 is for.
+
+### Worked example: the paper's audit figure
+
+Twenty FIVES reference masks, the reachable-length cost. This is the excerpt in
+Fig. 8 of the manuscript, from curvicost 0.2.1 with `--prune-px 17 --include-cases`
+(the layout is abridged; the tool prints more columns):
+
+```
+408 cases on 20 images; vs reachable length; ρ = aligned Spearman [95% cluster-bootstrap CI]; n = cases
+
+error type (n)   Dice              clDice            ERL               node match
+break (100)      +0.88             +0.86             +0.97             +0.79
+                 [+0.84, +0.91]    [+0.81, +0.90]    [+0.96, +0.98]    [+0.72, +0.85]
+bridge (30)      undefined         undefined         undefined         undefined
+truncate (98)    +0.98             +1.00             +1.00             +0.96
+                 [+0.97, +0.99]    [+1.00, +1.00]    [+1.00, +1.00]    [+0.92, +0.99]
+radius (80)      +0.45             +0.17             +0.91             -0.65
+                 [+0.42, +0.50]    [-0.03, +0.37]    [+0.73, +1.00]    [-0.73, -0.56]
+                                   blind                               anti-correlated
+boundary (100)   +0.82             +1.00             +1.00             +0.78
+                 [+0.73, +0.92]    [+1.00, +1.00]    [+1.00, +1.00]    [+0.68, +0.87]
+
+scale: median vessel radius 6.0 px; --prune-px 17 = 2.8 vessel radii
+redraw floor (the same structure drawn twice, 20 masks):
+  reachable length 1.000 [1.000, 1.000]   conductance 0.812 [0.278, 0.985]
+```
+
+**How to read it.** Each cell says how well that metric orders the cases of one
+error type by the reachable length they lose. A cell is significant when its
+interval excludes zero; the tool then prints nothing (it *tracks*) or names the
+problem. Twenty masks clear the 10-unit floor, so these are verdicts, not
+inconclusive readings.
+
+- **Break** (connections cut): all four metrics track, and ERL is the strongest
+  (+0.97, interval +0.96 to +0.98). Dice at +0.88 is good but less exact. Any of
+  the four is defensible here; ERL follows reachable length most closely.
+- **Truncate** and **boundary**: all four track. clDice and ERL reach +1.00, so
+  they order the cases exactly as reachable length does.
+- **Radius** (vessels thinner or thicker, topology intact): this is where the
+  metrics part. ERL still tracks (+0.91). Dice tracks only moderately (+0.45; the
+  interval excludes zero, so it is significant but weak). clDice is **blind**
+  (+0.17, interval −0.03 to +0.37 includes zero): it cannot see this error type on
+  these data. Node match is **anti-correlated** (−0.65, interval −0.73 to −0.56):
+  a better node-match score goes with *more* reachable length lost, so it should
+  not be used if radius-type errors matter.
+- **Bridge** (false connections): every metric reads `undefined`. Reachable
+  length is bounded by the reference, so a false connection cannot change it and
+  there is nothing to correlate. That is a statement about the cost. If false
+  merges matter to you, audit against a quantity a merge can change.
+- **Redraw floor**: drawing the same structure a second time from its own skeleton
+  and radii preserves all of the reachable length (1.000) but a median of 81% of
+  the conductance (worst mask 28%). Absolute conductance values from two
+  independently drawn masks are therefore not comparable at that level. Reachable
+  length reads 1 by construction.
+
+Across both costs in the full report, 44 of 60 cells carry a verdict: 41 track,
+1 is blind and 2 are anti-correlated (node match under radius, against both
+costs). On these data, with reachable length as the quantity, ERL tracks in every
+defined error type and Dice tracks in every one but weakly on radius. If the errors
+are thickness errors, do not rely on clDice or node match.
 
 ## What it measures
 
