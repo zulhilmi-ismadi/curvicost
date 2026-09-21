@@ -498,6 +498,13 @@ your structure's own median vessel radius and warns outside 1–4 radii; the
 study's four datasets sit at 2.0–2.7. Scale it to your data (the FIVES example
 above uses 17 px on 5.9 px vessels) or the numbers are not comparable.
 
+## What changed in 0.2.2
+
+Documentation only: the README gains "What to give it", "Reading the numbers"
+and "Which metric should I report?", with the paper's audit figure worked
+through cell by cell. The code, the costs and every number are identical to
+0.2.1.
+
 ## What changed in 0.2.1
 
 `audit` scores against a quantity the user supplies (`--cost-fn
@@ -554,7 +561,7 @@ Publishing → add a GitHub publisher with owner `zulhilmi-ismadi`, repository
 To release: bump `version` in `pyproject.toml`, commit, then
 
 ```bash
-git tag v0.2.1 && git push origin v0.2.1
+git tag v0.2.2 && git push origin v0.2.2
 ```
 
 The workflow refuses to publish if the tag and the package version disagree.
